@@ -1,0 +1,12 @@
+{
+  "_comment": "このファイルを custom フォルダに config.json としてコピーし、写真ファイル名を書いてください。書いたスロットだけが業種フォールバックより優先されます。",
+  "hero": "hero.jpg",
+  "about": "about.jpg",
+  "reason1": "reason1.jpg",
+  "reason2": "reason2.jpg",
+  "reason3": "reason3.jpg",
+  "cta": "cta.jpg",
+  "branch1": "branch1.jpg",
+  "branch2": "branch2.jpg",
+  "branch3": "branch3.jpg"
+}

@@ -20,13 +20,19 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from prompt_template import (
-    INDUSTRY_KEYS,
     COLOR_PRESETS,
+    CUSTOM_CATEGORY_LABEL,
+    INDUSTRY_PRESETS,
+    TARGET_TIER_KEY_TO_LABEL,
+    TARGET_TIER_LABEL_TO_KEY,
     build_input_sheet_md,
+    category_labels_for_tier,
     LP_TEMPLATE_OPTIONS,
     LP_TEMPLATE_LABEL_TO_KEY,
     LP_TEMPLATE_STYLE_FILES,
     normalize_lp_template_key,
+    normalize_target_tier,
+    resolve_preset_id,
 )
 from api_client import generate_lp
 
@@ -84,8 +90,15 @@ def normalize_output_dir(raw: str) -> Path:
 
 
 def safe_site_dir_segment(sheet: dict) -> str:
-    """出力サブフォルダ名用。プレースホルダ除去・Windows禁止文字除去。"""
-    raw = (sheet.get("name_en") or sheet.get("name_ja") or "lp_site").strip()
+    """出力サブフォルダ名用。店舗情報の先頭行などから派生。"""
+    shop = (sheet.get("shop_info") or "").strip()
+    first_line = ""
+    for line in shop.splitlines():
+        s = line.strip()
+        if s:
+            first_line = s
+            break
+    raw = first_line or (sheet.get("industry_label") or "lp_site").strip()
     raw = _strip_example_prefix(raw)
     if not raw:
         raw = "lp_site"
@@ -124,8 +137,18 @@ class LPBuilderApp(tk.Tk):
             else str((Path.home() / "LP_Projects").resolve())
         )
         self.output_dir = tk.StringVar(value=_init_out)
-        self.industry_var  = tk.StringVar(value=list(INDUSTRY_KEYS.keys())[0])
-        self.color_var     = tk.StringVar(value=list(COLOR_PRESETS.keys())[0])
+        cd0 = self.config_data
+        _tt = normalize_target_tier(cd0.get("target_tier", "mass"))
+        self.target_tier_var = tk.StringVar(
+            value=TARGET_TIER_KEY_TO_LABEL.get(_tt, "庶民向け")
+        )
+        _cats = category_labels_for_tier(_tt)
+        _cfg_cat = str(cd0.get("category_label") or "").strip()
+        if _cfg_cat not in _cats:
+            _cfg_cat = _cats[0]
+        self.category_var = tk.StringVar(value=_cfg_cat)
+        self.custom_industry_var = tk.StringVar(value=str(cd0.get("custom_industry", "")))
+        self.color_var = tk.StringVar(value=list(COLOR_PRESETS.keys())[0])
         _cfg_tpl = normalize_lp_template_key(self.config_data.get("lp_template", "classic"))
         _tpl_label = next(
             (lab for lab, k in LP_TEMPLATE_OPTIONS if k == _cfg_tpl),
@@ -188,15 +211,11 @@ class LPBuilderApp(tk.Tk):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
-        self.tab_basic    = self._make_tab("① 基本情報")
-        self.tab_services = self._make_tab("② サービス")
-        self.tab_reasons  = self._make_tab("③ 推しポイント")
+        self.tab_basic = self._make_tab("① 入力")
         self.tab_settings = self._make_tab("⚙ 設定")
-        self.tab_log      = self._make_tab("④ ログ")
+        self.tab_log = self._make_tab("④ ログ")
 
         self._build_tab_basic()
-        self._build_tab_services()
-        self._build_tab_reasons()
         self._build_tab_settings()
         self._build_tab_log()
 
@@ -208,7 +227,7 @@ class LPBuilderApp(tk.Tk):
         self.nb.add(frame, text=label)
         return frame
 
-    # ─── タブ①：基本情報 ─────────────────────
+    # ─── タブ①：入力 ─────────────────────────
     def _build_tab_basic(self):
         f = self.tab_basic
         canvas = tk.Canvas(f, bg=BG_INPUT, highlightthickness=0)
@@ -220,128 +239,149 @@ class LPBuilderApp(tk.Tk):
         canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
 
-        p = 16
-        self._section_label(inner, "業種・デザイン")
-        row = tk.Frame(inner, bg=BG_INPUT)
-        row.pack(fill="x", padx=p, pady=4)
-        tk.Label(row, text="業種", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
-        cb = ttk.Combobox(row, textvariable=self.industry_var,
-                          values=list(INDUSTRY_KEYS.keys()), state="readonly", width=28)
-        cb.pack(side="left", padx=4)
+        def _wheel(evt):
+            canvas.yview_scroll(int(-1 * (evt.delta / 120)), "units")
 
+        canvas.bind("<MouseWheel>", _wheel)
+        inner.bind("<MouseWheel>", _wheel)
+
+        p = 16
+        self._section_label(inner, "ターゲット・業種（AIに推定させません）")
+        row_t = tk.Frame(inner, bg=BG_INPUT)
+        row_t.pack(fill="x", padx=p, pady=4)
+        tk.Label(row_t, text="ターゲット層", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        cb_tier = ttk.Combobox(
+            row_t,
+            textvariable=self.target_tier_var,
+            values=list(TARGET_TIER_LABEL_TO_KEY.keys()),
+            state="readonly",
+            width=28,
+        )
+        cb_tier.pack(side="left", padx=4)
+        cb_tier.bind("<<ComboboxSelected>>", self._on_target_tier_changed)
+
+        row_c = tk.Frame(inner, bg=BG_INPUT)
+        row_c.pack(fill="x", padx=p, pady=4)
+        tk.Label(row_c, text="業種カテゴリ", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        tk_key = normalize_target_tier(self.target_tier_var.get())
+        self.cb_category = ttk.Combobox(
+            row_c,
+            textvariable=self.category_var,
+            values=category_labels_for_tier(tk_key),
+            state="readonly",
+            width=36,
+        )
+        self.cb_category.pack(side="left", padx=4)
+        self.cb_category.bind("<<ComboboxSelected>>", lambda _e: self._toggle_custom_industry_row())
+
+        self.custom_row = tk.Frame(inner, bg=BG_INPUT)
+        tk.Label(self.custom_row, text="業種（自由入力）", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        tk.Entry(
+            self.custom_row,
+            textvariable=self.custom_industry_var,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            width=42,
+        ).pack(side="left", padx=4, fill="x", expand=True)
+
+        self._toggle_custom_industry_row()
+
+        self._section_label(inner, "店舗情報・本文メモ")
+        tk.Label(
+            inner,
+            text="店名・住所・電話・営業時間など、LPに載せたいことをまとめて入力してください。",
+            bg=BG_INPUT,
+            fg=FG_SUB,
+            font=("Segoe UI", 9),
+            wraplength=820,
+            justify="left",
+        ).pack(anchor="w", padx=p)
+        self.shop_text = scrolledtext.ScrolledText(
+            inner,
+            height=8,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            wrap="word",
+        )
+        self.shop_text.pack(fill="x", padx=p, pady=(4, 12))
+
+        tk.Label(inner, text="サービス内容（ちょっとでOK）", bg=BG_INPUT, fg=GOLD, font=FONT_BODY).pack(anchor="w", padx=p)
+        self.service_text = scrolledtext.ScrolledText(
+            inner,
+            height=5,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            wrap="word",
+        )
+        self.service_text.pack(fill="x", padx=p, pady=(4, 12))
+
+        tk.Label(
+            inner,
+            text="推しポイント（任意・空でも可。空のときはAIが業種・ターゲットに合わせて補完）",
+            bg=BG_INPUT,
+            fg=GOLD,
+            font=FONT_BODY,
+        ).pack(anchor="w", padx=p)
+        self.selling_text = scrolledtext.ScrolledText(
+            inner,
+            height=5,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            wrap="word",
+        )
+        self.selling_text.pack(fill="x", padx=p, pady=(4, 12))
+
+        self._section_label(inner, "見た目（CSS）")
         row2 = tk.Frame(inner, bg=BG_INPUT)
         row2.pack(fill="x", padx=p, pady=4)
         tk.Label(row2, text="カラー", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
-        cb2 = ttk.Combobox(row2, textvariable=self.color_var,
-                           values=list(COLOR_PRESETS.keys()), state="readonly", width=36)
-        cb2.pack(side="left", padx=4)
+        ttk.Combobox(
+            row2,
+            textvariable=self.color_var,
+            values=list(COLOR_PRESETS.keys()),
+            state="readonly",
+            width=36,
+        ).pack(side="left", padx=4)
 
         row_tpl = tk.Frame(inner, bg=BG_INPUT)
         row_tpl.pack(fill="x", padx=p, pady=4)
         tk.Label(row_tpl, text="LPテンプレート", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
-        cb_tpl = ttk.Combobox(
+        ttk.Combobox(
             row_tpl,
             textvariable=self.lp_template_var,
             values=[lab for lab, _ in LP_TEMPLATE_OPTIONS],
             state="readonly",
             width=36,
-        )
-        cb_tpl.pack(side="left", padx=4)
+        ).pack(side="left", padx=4)
 
-        self._section_label(inner, "店舗情報")
-        fields = [
-            ("name_ja",  "店舗名（日本語）", "例: PAWS MINATO"),
-            ("name_en",  "店舗名（英語）",   "例: PAWS MINATO"),
-            ("catch",    "キャッチコピー",   "例: 愛犬に、最高の一日を。"),
-            ("sub_copy", "サブコピー",       "例: 港区の小型犬専門プレミアムサロン"),
-            ("address",  "住所",             "例: 東京都港区麻布十番2-1-1"),
-            ("tel",      "電話番号",         "例: 03-1234-5678"),
-            ("hours",    "営業時間",         "例: 10:00〜19:00"),
-            ("holiday",  "定休日",           "例: 火曜日"),
-            ("station",  "最寄り駅",         "例: 麻布十番駅 徒歩2分"),
-            ("url",      "WebサイトURL",     "例: https://example.com"),
-        ]
-        self.basic_vars = {}
-        for key, label, placeholder in fields:
-            self.basic_vars[key] = self._entry_row(inner, label, placeholder, p)
+    def _on_target_tier_changed(self, _evt=None):
+        tk = normalize_target_tier(self.target_tier_var.get())
+        labs = category_labels_for_tier(tk)
+        self.cb_category["values"] = labs
+        cur = self.category_var.get()
+        if cur not in labs:
+            self.category_var.set(labs[0])
+        self._toggle_custom_industry_row()
 
-    # ─── タブ②：サービス ─────────────────────
-    def _build_tab_services(self):
-        f = self.tab_services
-        self._section_label(f, "サービス内容（3〜6項目）")
-        tk.Label(f, text="タイトルと説明を入力してください。空欄は自動補完されます。",
-                 bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(padx=16, anchor="w")
+    def _toggle_custom_industry_row(self):
+        if self.category_var.get() == CUSTOM_CATEGORY_LABEL:
+            self.custom_row.pack(fill="x", padx=16, pady=4)
+        else:
+            self.custom_row.pack_forget()
 
-        self.service_vars = []
-        for i in range(6):
-            grp = tk.LabelFrame(f, text=f"サービス {i+1}",
-                                bg=BG_INPUT, fg=GOLD, font=FONT_BODY,
-                                bd=1, relief="groove")
-            grp.pack(fill="x", padx=16, pady=4)
-            t_var = tk.StringVar()
-            d_var = tk.StringVar()
-            row1 = tk.Frame(grp, bg=BG_INPUT)
-            row1.pack(fill="x", padx=8, pady=2)
-            tk.Label(row1, text="タイトル", width=8, anchor="w",
-                     bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
-            tk.Entry(row1, textvariable=t_var, bg=BG_PANEL, fg=FG_MAIN,
-                     insertbackground=FG_MAIN, relief="flat", font=FONT_BODY).pack(side="left", fill="x", expand=True, padx=4)
-            row2 = tk.Frame(grp, bg=BG_INPUT)
-            row2.pack(fill="x", padx=8, pady=2)
-            tk.Label(row2, text="説明", width=8, anchor="w",
-                     bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
-            tk.Entry(row2, textvariable=d_var, bg=BG_PANEL, fg=FG_MAIN,
-                     insertbackground=FG_MAIN, relief="flat", font=FONT_BODY).pack(side="left", fill="x", expand=True, padx=4)
-            self.service_vars.append({"title": t_var, "desc": d_var})
-
-    # ─── タブ③：推しポイント ──────────────────
-    def _build_tab_reasons(self):
-        f = self.tab_reasons
-        self._section_label(f, "推しポイント / 選ばれる理由（最大3つ）")
-        tk.Label(f, text="空欄は業種に合わせて自動補完されます。",
-                 bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(padx=16, anchor="w")
-
-        self.reason_vars = []
-        for i in range(3):
-            grp = tk.LabelFrame(f, text=f"REASON {i+1:02d}",
-                                bg=BG_INPUT, fg=GOLD, font=FONT_BODY,
-                                bd=1, relief="groove")
-            grp.pack(fill="x", padx=16, pady=6)
-            t_var = tk.StringVar()
-            d_var = tk.StringVar()
-            f1_var, f2_var, f3_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
-
-            for label, var, ph in [
-                ("タイトル", t_var, "例: 完全個室でストレスゼロ"),
-                ("説明文",   d_var, "例: 他の犬と接触なし、リアルタイム動画配信"),
-            ]:
-                row = tk.Frame(grp, bg=BG_INPUT)
-                row.pack(fill="x", padx=8, pady=2)
-                tk.Label(row, text=label, width=8, anchor="w",
-                         bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
-                e = tk.Entry(row, textvariable=var, bg=BG_PANEL, fg=FG_MAIN,
-                             insertbackground=FG_MAIN, relief="flat", font=FONT_BODY)
-                e.pack(side="left", fill="x", expand=True, padx=4)
-                e.insert(0, ph)
-                e.config(fg=FG_SUB)
-                e.bind("<FocusIn>",  lambda ev, v=var, p=ph: self._clear_placeholder(ev, v, p))
-                e.bind("<FocusOut>", lambda ev, v=var, p=ph: self._set_placeholder(ev, v, p))
-
-            feat_row = tk.Frame(grp, bg=BG_INPUT)
-            feat_row.pack(fill="x", padx=8, pady=2)
-            tk.Label(feat_row, text="特徴3つ", width=8, anchor="w",
-                     bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
-            for fv in [f1_var, f2_var, f3_var]:
-                tk.Entry(feat_row, textvariable=fv, bg=BG_PANEL, fg=FG_MAIN,
-                         insertbackground=FG_MAIN, relief="flat", font=FONT_BODY,
-                         width=18).pack(side="left", padx=2)
-
-            self.reason_vars.append({
-                "title": t_var, "desc": d_var,
-                "features": [f1_var, f2_var, f3_var]
-            })
-
-    # ─── タブ④：設定 ─────────────────────────
+    # ─── タブ②：設定 ─────────────────────────
     def _build_tab_settings(self):
         f = self.tab_settings
         self._section_label(f, "Claude API 設定")
@@ -484,30 +524,6 @@ class LPBuilderApp(tk.Tk):
         tk.Label(parent, text=text, bg=BG_INPUT, fg=GOLD,
                  font=FONT_H2, pady=8).pack(anchor="w", padx=16)
 
-    def _entry_row(self, parent, label, placeholder, padx):
-        row = tk.Frame(parent, bg=BG_INPUT)
-        row.pack(fill="x", padx=padx, pady=3)
-        tk.Label(row, text=label, width=16, anchor="w",
-                 bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
-        var = tk.StringVar()
-        e = tk.Entry(row, textvariable=var, bg=BG_PANEL, fg=FG_SUB,
-                     insertbackground=FG_MAIN, relief="flat", font=FONT_BODY)
-        e.pack(side="left", fill="x", expand=True, padx=4)
-        e.insert(0, placeholder)
-        e.bind("<FocusIn>",  lambda ev, v=var, p=placeholder: self._clear_placeholder(ev, v, p))
-        e.bind("<FocusOut>", lambda ev, v=var, p=placeholder: self._set_placeholder(ev, v, p))
-        return var
-
-    def _clear_placeholder(self, event, var, placeholder):
-        if event.widget.get() == placeholder:
-            event.widget.delete(0, "end")
-            event.widget.config(fg=FG_MAIN)
-
-    def _set_placeholder(self, event, var, placeholder):
-        if not event.widget.get():
-            event.widget.insert(0, placeholder)
-            event.widget.config(fg=FG_SUB)
-
     def _browse_output(self):
         try:
             start = str(normalize_output_dir(self.output_dir.get()))
@@ -636,46 +652,46 @@ class LPBuilderApp(tk.Tk):
         self.update_idletasks()
 
     def _collect_sheet(self) -> dict:
-        """GUIの入力値を辞書にまとめる"""
+        """GUIの入力値を辞書にまとめる（業種は UI で確定済み）"""
         color_name = self.color_var.get()
         color = COLOR_PRESETS.get(color_name, list(COLOR_PRESETS.values())[0])
 
-        # プレースホルダーを除外
-        def clean(var, placeholder=""):
-            v = var.get().strip()
-            return "" if v == placeholder else v
+        tk = normalize_target_tier(self.target_tier_var.get())
+        cat_label = self.category_var.get()
+        preset_id = resolve_preset_id(tk, cat_label)
 
-        services = []
-        for sv in self.service_vars:
-            t = sv["title"].get().strip()
-            d = sv["desc"].get().strip()
-            if t:
-                services.append({"title": t, "desc": d})
+        if cat_label == CUSTOM_CATEGORY_LABEL:
+            # industry_type = 中分類／個別コード（カスタム）
+            industry_type_code = "custom"
+            industry_group = "custom"
+            industry_label = self.custom_industry_var.get().strip()
+            preset_id_final = None
+        else:
+            if not preset_id:
+                fallback_label = category_labels_for_tier(tk)[0]
+                preset_id = resolve_preset_id(tk, fallback_label)
+            preset_id_final = preset_id
+            industry_type_code = preset_id
+            industry_label = cat_label
+            industry_group = (
+                str(INDUSTRY_PRESETS[preset_id]["industry_group"]) if preset_id else "custom"
+            )
 
-        reasons = []
-        for rv in self.reason_vars:
-            t = rv["title"].get().strip()
-            d = rv["desc"].get().strip()
-            feats = [fv.get().strip() for fv in rv["features"] if fv.get().strip()]
-            if t:
-                reasons.append({"title": t, "desc": d, "features": feats})
+        shop_info = self.shop_text.get("1.0", "end").strip()
+        service_summary = self.service_text.get("1.0", "end").strip()
+        selling_points = self.selling_text.get("1.0", "end").strip()
 
         return {
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "industry":   self.industry_var.get(),
-            "name_ja":    self.basic_vars["name_ja"].get(),
-            "name_en":    self.basic_vars["name_en"].get(),
-            "catch":      self.basic_vars["catch"].get(),
-            "sub_copy":   self.basic_vars["sub_copy"].get(),
-            "address":    self.basic_vars["address"].get(),
-            "tel":        self.basic_vars["tel"].get(),
-            "hours":      self.basic_vars["hours"].get(),
-            "holiday":    self.basic_vars["holiday"].get(),
-            "station":    self.basic_vars["station"].get(),
-            "url":        self.basic_vars["url"].get(),
-            "services":   services,
-            "reasons":    reasons,
-            "color":      color,
+            "target_tier": tk,
+            "industry_group": industry_group,
+            "industry_type": industry_type_code,
+            "industry_label": industry_label or "（未入力）",
+            "preset_id": preset_id_final,
+            "shop_info": shop_info,
+            "service_summary": service_summary,
+            "selling_points": selling_points,
+            "color": color,
             "color_name": color_name,
             "lp_template": normalize_lp_template_key(
                 LP_TEMPLATE_LABEL_TO_KEY.get(self.lp_template_var.get())
@@ -689,14 +705,26 @@ class LPBuilderApp(tk.Tk):
         api_key = self.api_key_var.get().strip()
         if not api_key:
             messagebox.showerror("エラー", "APIキーを設定タブに入力してください。")
-            self.nb.select(3)
+            self.nb.select(1)
             return
 
-        name = self.basic_vars["name_en"].get().strip() or self.basic_vars["name_ja"].get().strip()
-        if not name:
-            messagebox.showerror("エラー", "① 基本情報タブで店舗名を入力してください。")
+        shop = self.shop_text.get("1.0", "end").strip()
+        if not shop:
+            messagebox.showerror(
+                "エラー",
+                "① 入力タブの「店舗情報・本文メモ」に、少なくとも店名や基本情報を入力してください。",
+            )
             self.nb.select(0)
             return
+
+        if self.category_var.get() == CUSTOM_CATEGORY_LABEL:
+            if not self.custom_industry_var.get().strip():
+                messagebox.showerror(
+                    "エラー",
+                    "業種カテゴリが「その他」のときは、「業種（自由入力）」を入力してください。",
+                )
+                self.nb.select(0)
+                return
 
         self.is_generating = True
         self.gen_btn.config(state="disabled", text="  生成中...  ", bg=BG_PANEL, fg=FG_SUB)
@@ -883,6 +911,9 @@ class LPBuilderApp(tk.Tk):
             "lp_template": normalize_lp_template_key(
                 LP_TEMPLATE_LABEL_TO_KEY.get(self.lp_template_var.get())
             ),
+            "target_tier": normalize_target_tier(self.target_tier_var.get()),
+            "category_label": self.category_var.get(),
+            "custom_industry": self.custom_industry_var.get().strip(),
         }
         CONFIG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         self._log("設定を保存しました")

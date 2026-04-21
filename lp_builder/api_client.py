@@ -7,7 +7,12 @@ import re
 
 import anthropic
 
-from prompt_template import build_system_prompt, build_user_prompt, normalize_lp_template_key
+from prompt_template import (
+    build_system_prompt,
+    build_user_prompt,
+    normalize_lp_template_key,
+    normalize_target_tier,
+)
 
 # 1リクエストあたりの「生成の最大長」上限。
 # 課金はこの数値ではなく実際の入出力トークン（max_tokens を満額使っても丸ごと請求されるわけではない）
@@ -29,7 +34,10 @@ def generate_lp(sheet: dict, api_key: str, on_progress=None) -> dict:
     """
     client = anthropic.Anthropic(api_key=api_key)
 
-    system_prompt = build_system_prompt(normalize_lp_template_key(sheet.get("lp_template")))
+    system_prompt = build_system_prompt(
+        normalize_lp_template_key(sheet.get("lp_template")),
+        normalize_target_tier(sheet.get("target_tier")),
+    )
     user_prompt = build_user_prompt(sheet)
 
     if on_progress:

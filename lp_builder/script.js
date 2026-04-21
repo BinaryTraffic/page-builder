@@ -236,8 +236,21 @@ function initLpScripts() {
     });
   })();
 
-  // ページ内リンク（#...）のスクロールは CSS 側の
-  // html { scroll-behavior: smooth; } に委譲する
+  // ページ内アンカーリンクのスムーズスクロール
+  // CSS scroll-behavior は body の overflow-x:hidden により無効になるブラウザがあるため JS で補完
+  document.addEventListener('click', function onAnchorClick(e) {
+    const a = e.target.closest('a[href^="#"]');
+    if (!a) return;
+    const id = decodeURIComponent(a.getAttribute('href').slice(1));
+    if (!id) return;
+    const target = document.getElementById(id);
+    if (!target) return;
+    e.preventDefault();
+    const navbar = document.getElementById('navbar');
+    const offset = navbar ? navbar.offsetHeight + 8 : 80;
+    const top = target.getBoundingClientRect().top + window.scrollY - offset;
+    window.scrollTo({ top, behavior: 'smooth' });
+  });
 }
 
 if (document.readyState === 'loading') {

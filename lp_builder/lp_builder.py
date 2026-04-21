@@ -151,6 +151,30 @@ def _strip_navbar_inline_styles(html: str) -> str:
     return re.sub(r"<(?:nav|header)\b[^>]*>", _clean_tag, html, flags=re.I)
 
 
+def _ensure_navbar_class(html: str) -> str:
+    """
+    id="navbar" を持つ <nav> / <header> 開始タグに class="navbar" を保証する。
+    モデル出力で class が欠けると .navbar 系の基本スタイル/挙動が効かないため、保存時に補正する。
+    """
+    if not html:
+        return html
+
+    def _fix_tag(m: re.Match) -> str:
+        tag = m.group(0)
+        if not re.search(r'\bid\s*=\s*["\']navbar["\']', tag, re.I):
+            return tag
+        cm = re.search(r'\bclass\s*=\s*(["\'])(.*?)\1', tag, re.I | re.S)
+        if cm:
+            cls = cm.group(2)
+            if re.search(r'(^|\s)navbar(\s|$)', cls):
+                return tag
+            new_cls = (cls + " navbar").strip()
+            return tag[: cm.start(2)] + new_cls + tag[cm.end(2) :]
+        return re.sub(r"<(?:nav|header)\b", r'\g<0> class="navbar"', tag, count=1, flags=re.I)
+
+    return re.sub(r"<(?:nav|header)\b[^>]*>", _fix_tag, html, flags=re.I)
+
+
 def _hash_anchor_mismatches(html: str) -> list[str]:
     """
     href=\"#...\" のページ内リンクに対し、対応する id または name が HTML 内にあるか検査する。
@@ -1543,6 +1567,7 @@ class LPBuilderApp(tk.Tk):
         html_path = out_dir / "index.html"
         cache_ver = ts.replace("_", "")
         raw_html = _strip_navbar_inline_styles(result["html"])
+        raw_html = _ensure_navbar_class(raw_html)
         html_final = _inject_asset_cache_bust(raw_html, cache_ver)
         html_path.write_text(html_final, encoding="utf-8")
         self._log(

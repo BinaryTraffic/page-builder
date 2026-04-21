@@ -11,6 +11,13 @@
  */
 (function () {
   'use strict';
+  var TRANSPARENT_GIF =
+    'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+  function backupPhotoUrl(img) {
+    var label = (img.getAttribute('alt') || 'image').slice(0, 40);
+    var seed = encodeURIComponent(INDUSTRY + '-' + label);
+    return 'https://picsum.photos/seed/' + seed + '/1200/800';
+  }
 
   const INDUSTRY = document.documentElement.dataset.industry || 'default';
 
@@ -173,6 +180,84 @@
     });
   }
 
+  function rescueUrlFor(img, images) {
+    if (!images || !img) return null;
+    if (img.closest('.about, .about-grid, .about-image, .about-img-wrap')) {
+      return images.about && images.about.medium;
+    }
+    if (img.closest('.reason-block, .reason-img, .reason-image, .reasons-section')) {
+      var reasonImgs = Array.prototype.slice.call(
+        document.querySelectorAll(
+          '.reason-img img, .reason-image img, .reasons-section .reason-block img'
+        )
+      );
+      var idx = reasonImgs.indexOf(img);
+      if (idx < 0) idx = 0;
+      if (idx % 3 === 0 && images.reason1) return images.reason1.medium;
+      if (idx % 3 === 1 && images.reason2) return images.reason2.medium;
+      if (idx % 3 === 2 && images.reason3) return images.reason3.medium;
+    }
+    if (img.closest('.branch-card, .branches, .branch-img')) {
+      var branchImgs = Array.prototype.slice.call(
+        document.querySelectorAll('.branch-img img, .branch-card img')
+      );
+      var b = branchImgs.indexOf(img);
+      if (b < 0) b = 0;
+      if (b % 3 === 0 && images.branch1) return images.branch1.medium;
+      if (b % 3 === 1 && images.branch2) return images.branch2.medium;
+      if (b % 3 === 2 && images.branch3) return images.branch3.medium;
+    }
+    if (img.closest('.service-image, .lp-card, .services-section')) {
+      var serviceImgs = Array.prototype.slice.call(
+        document.querySelectorAll('.service-image img, .services-section .lp-card img')
+      );
+      var s = serviceImgs.indexOf(img);
+      if (s < 0) s = 0;
+      if (s % 3 === 0 && images.reason1) return images.reason1.medium;
+      if (s % 3 === 1 && images.reason2) return images.reason2.medium;
+      if (s % 3 === 2 && images.reason3) return images.reason3.medium;
+    }
+    return (images.reason1 && images.reason1.medium) || (images.about && images.about.medium) || null;
+  }
+
+  function attachBrokenImageRescue(getImages) {
+    document.querySelectorAll('img').forEach(function (img) {
+      if (img.dataset.pexelsRescueBound === '1') return;
+      img.dataset.pexelsRescueBound = '1';
+
+      // 空 src は error が上がらない場合があるため、初期段階で補正する
+      var rawSrc = (img.getAttribute('src') || '').trim();
+      if (!rawSrc || rawSrc === '#' || /^about:blank$/i.test(rawSrc)) {
+        var images0 = getImages();
+        var next0 = rescueUrlFor(img, images0);
+        img.src = next0 || backupPhotoUrl(img);
+        img.dataset.pexelsRescueAttempt = '1';
+      }
+
+      img.addEventListener('error', function () {
+        var attempt = parseInt(img.dataset.pexelsRescueAttempt || '0', 10) || 0;
+        var images = getImages();
+        var next = rescueUrlFor(img, images);
+        var current = img.currentSrc || img.src || '';
+        if (attempt === 0) {
+          // 1回目: 業種フォールバック（同一URLなら backup を使う）
+          if (!next || next === current || next === (img.getAttribute('src') || '')) {
+            next = backupPhotoUrl(img);
+          }
+        } else if (attempt === 1) {
+          // 2回目: 外部バックアップ画像
+          next = backupPhotoUrl(img);
+          if (next === current) next = TRANSPARENT_GIF;
+        } else {
+          // 3回目以降: 最終的に透明GIFへ
+          next = TRANSPARENT_GIF;
+        }
+        img.dataset.pexelsRescueAttempt = String(attempt + 1);
+        img.src = next;
+      });
+    });
+  }
+
   function deepMergePack(base, overlay) {
     var m = JSON.parse(JSON.stringify(base));
     for (var k in overlay) {
@@ -217,6 +302,9 @@
   // ── ① 業種フォールバック（目的: 業種に即した初期イメージ）
   var pack = JSON.parse(JSON.stringify(FALLBACK[INDUSTRY] || FALLBACK.default));
   applyImages(pack);
+  attachBrokenImageRescue(function () {
+    return pack;
+  });
   footerCredit();
 
   // 任意機能はデフォルト無効:

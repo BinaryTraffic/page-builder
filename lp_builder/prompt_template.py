@@ -500,7 +500,7 @@ def build_system_prompt(
 - 日本語コンテンツ
 
 ## 参照するクラス（style.css 定義済み・これを使う）
-- ナビ: `nav` に id="navbar"（任意で `data-nav-max-visible="4"`：バーに並べる最大リンク数。省略時は 4）、メニューに id="navMenu" class="nav-menu"（**同一階層に並ぶ** `a` がナビ項目。CTA は最後に `class="nav-cta"`）、ハンバーガーに id="navToggle" class="nav-toggle"。**script.js** が左からスライドするメニューを追加する：デスクトップは先頭 N 件だけバー表示・それ以降は「メニュー」から、モバイルはハンバーガーで全リンクを同じドロワーに表示。**右上の予約・問い合わせ導線は** `class="nav-cta"` **のみ**（`btn` / `btn-lg` を併用しない。1行表示が前提）
+- ナビ: `<nav id="navbar" class="navbar" ...>` を必須（`class="navbar"` を省略しない）。`data-nav-max-visible="4"` は任意（バーに並べる最大リンク数。省略時は 4）。メニューは id="navMenu" class="nav-menu"（**同一階層に並ぶ** `a` がナビ項目。CTA は最後に `class="nav-cta"`）、ハンバーガーは id="navToggle" class="nav-toggle"。**script.js** が左からスライドするメニューを追加する：デスクトップは先頭 N 件だけバー表示・それ以降は「メニュー」から、モバイルはハンバーガーで全リンクを同じドロワーに表示。**右上の予約・問い合わせ導線は** `class="nav-cta"` **のみ**（`btn` / `btn-lg` を併用しない。1行表示が前提）
 - ヒーロー: .hero, .hero-bg, .hero-overlay, .hero-content, .glass-card, .hero-title, .btn, .btn-primary …
 - セクション: .section, .section-header, .section-en, .section-title, .container
 - About: .about, .about-grid, .about-img-wrap, .about-text …

@@ -219,38 +219,51 @@
   applyImages(pack);
   footerCredit();
 
-  var API_BASE = 'http://localhost:8200';
+  // 任意機能はデフォルト無効:
+  // - ローカル API: <html data-image-api="1" data-image-api-base="http://localhost:8200">
+  // - custom/config.json: <html data-custom-images="1">
+  var root = document.documentElement;
+  var useLocalApi = /^(1|true|on)$/i.test(root.getAttribute('data-image-api') || '');
+  var useCustomConfig = /^(1|true|on)$/i.test(root.getAttribute('data-custom-images') || '');
+  var apiBase = root.getAttribute('data-image-api-base') || 'http://localhost:8200';
 
-  fetch(API_BASE + '/api/images/' + encodeURIComponent(INDUSTRY))
-    .then(function (res) {
-      if (!res.ok) return null;
-      return res.json();
-    })
-    .then(function (data) {
-      if (data && data.images) {
-        pack = deepMergePack(pack, data.images);
+  function applyLocalApi() {
+    if (!useLocalApi) return Promise.resolve();
+    return fetch(apiBase + '/api/images/' + encodeURIComponent(INDUSTRY))
+      .then(function (res) {
+        if (!res.ok) return null;
+        return res.json();
+      })
+      .then(function (data) {
+        if (data && data.images) {
+          pack = deepMergePack(pack, data.images);
+          applyImages(pack);
+        }
+      })
+      .catch(function () {
+        console.info('[pexels.js] data-image-api が有効ですが API に接続できません（スキップ）。');
+      });
+  }
+
+  function applyCustomConfig() {
+    if (!useCustomConfig) return Promise.resolve();
+    return fetch('./custom/config.json?_=' + Date.now())
+      .then(function (res) {
+        if (!res || !res.ok) return null;
+        return res.json();
+      })
+      .then(function (cfg) {
+        if (!cfg || typeof cfg !== 'object') return;
+        var custom = packFromCustomConfig(cfg);
+        if (!custom) return;
+        pack = deepMergePack(pack, custom);
         applyImages(pack);
-      }
-    })
-    .catch(function () {
-      console.info('[pexels.js] localhost:8200 は利用できません（スキップ）。');
-    })
-    .then(function () {
-      return fetch('./custom/config.json?_=' + Date.now());
-    })
-    .then(function (res) {
-      if (!res || !res.ok) return null;
-      return res.json();
-    })
-    .then(function (cfg) {
-      if (!cfg || typeof cfg !== 'object') return;
-      var custom = packFromCustomConfig(cfg);
-      if (!custom) return;
-      pack = deepMergePack(pack, custom);
-      applyImages(pack);
-      console.info('[pexels.js] custom/config.json を適用しました（顧客画像で上書き）。');
-    })
-    .catch(function () {
-      /* config.json が無い場合はそのまま */
-    });
+        console.info('[pexels.js] custom/config.json を適用しました（顧客画像で上書き）。');
+      })
+      .catch(function () {
+        /* 任意ファイル。無い場合はそのまま */
+      });
+  }
+
+  applyLocalApi().then(applyCustomConfig);
 })();

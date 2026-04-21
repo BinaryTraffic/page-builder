@@ -3,13 +3,18 @@ LP Builder — ランディングページ自動生成ツール
 Python 3.x + tkinter（追加インストール不要）
 """
 
+import csv
 import functools
 import http.server
 import json
 import os
+import re
+import uuid
 import socketserver
+import subprocess
 import sys
 import threading
+import urllib.parse
 import webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
@@ -27,6 +32,9 @@ from prompt_template import (
     TARGET_TIER_LABEL_TO_KEY,
     build_input_sheet_md,
     category_labels_for_tier,
+    default_selling_points_for,
+    default_service_summary_for,
+    default_shop_info_for,
     LP_TEMPLATE_OPTIONS,
     LP_TEMPLATE_LABEL_TO_KEY,
     LP_TEMPLATE_STYLE_FILES,
@@ -34,7 +42,7 @@ from prompt_template import (
     normalize_target_tier,
     resolve_preset_id,
 )
-from api_client import generate_lp
+from api_client import CLAUDE_LP_MODEL, generate_lp
 
 # ─────────────────────────────────────────────
 # 定数
@@ -42,6 +50,8 @@ from api_client import generate_lp
 APP_TITLE   = "LP Builder  —  ランディングページ自動生成"
 APP_VERSION = "1.0.0"
 CONFIG_FILE = Path.home() / ".lp_builder_config.json"
+# API 利用明細（追記型）。ホーム直下に保存し、別名エクスポートも可能。
+USAGE_LEDGER_JSON = Path.home() / ".lp_builder_api_usage.json"
 
 BG_DARK   = "#1a1a1a"
 BG_PANEL  = "#242424"
@@ -52,6 +62,7 @@ GOLD      = "#c9a96e"
 GOLD_DARK = "#a07840"
 RED_ERR   = "#e05555"
 GREEN_OK  = "#55c055"
+WARN_MSG  = "#e8b86d"
 
 FONT_H1   = ("Segoe UI", 16, "bold")
 FONT_H2   = ("Segoe UI", 12, "bold")
@@ -89,6 +100,103 @@ def normalize_output_dir(raw: str) -> Path:
         return p
 
 
+def _inject_asset_cache_bust(html: str, version: str) -> str:
+    """index.html 内の style.css / script.js / pexels.js 参照にキャッシュバスト用 ?v= を付与する。"""
+    if not html:
+        return html
+    v = re.sub(r"[^\w.-]+", "", (version or "").strip())[:80] or "1"
+    out = html
+    out = re.sub(
+        r'href=(["\'])style\.css(?:\?[^"\']*)?\1',
+        rf"href=\1style.css?v={v}\1",
+        out,
+        flags=re.IGNORECASE,
+    )
+    for name in ("script.js", "pexels.js"):
+        out = re.sub(
+            rf'src=(["\']){re.escape(name)}(?:\?[^"\']*)?\1',
+            rf"src=\1{name}?v={v}\1",
+            out,
+            flags=re.IGNORECASE,
+        )
+    return out
+
+
+def _strip_navbar_inline_styles(html: str) -> str:
+    """
+    id="navbar" の <nav> / <header> 開始タグに付いた style はブラウザで強く効き、
+    白背景のまま白文字のナビになることがある。外部 CSS を効かせるため style 属性を除去する。
+    """
+    if not html:
+        return html
+
+    def _clean_tag(m: re.Match) -> str:
+        tag = m.group(0)
+        if not re.search(r'\bid\s*=\s*["\']navbar["\']', tag, re.I):
+            return tag
+        t2 = tag
+        for _ in range(8):
+            nxt = re.sub(
+                r'\sstyle\s*=\s*("[^"]*"|\'[^\']*\')',
+                "",
+                t2,
+                count=1,
+                flags=re.I,
+            )
+            if nxt == t2:
+                break
+            t2 = nxt
+        return t2
+
+    return re.sub(r"<(?:nav|header)\b[^>]*>", _clean_tag, html, flags=re.I)
+
+
+def _hash_anchor_mismatches(html: str) -> list[str]:
+    """
+    href=\"#...\" のページ内リンクに対し、対応する id または name が HTML 内にあるか検査する。
+    モデルが id を付け忘れたとき、スクロールが効かない原因の手がかりになる。
+    """
+    if not html:
+        return []
+    ids = set(re.findall(r'\bid\s*=\s*["\']([^"\']+)["\']', html, re.I))
+    names = set(re.findall(r'\bname\s*=\s*["\']([^"\']+)["\']', html, re.I))
+    frags: set[str] = set()
+    for m in re.finditer(r'\bhref\s*=\s*["\']#([^"\'#?]*)["\']', html, re.I):
+        frag = (m.group(1) or "").strip()
+        if not frag:
+            continue
+        try:
+            frag = urllib.parse.unquote(frag)
+        except Exception:
+            pass
+        frags.add(frag)
+    out: list[str] = []
+    for frag in sorted(frags):
+        if frag not in ids and frag not in names:
+            out.append(
+                f'ページ内リンク #{frag} に対応する id="{frag}"（または name）がありません'
+            )
+    return out
+
+
+def _usage_meta_from_sheet(sheet: dict, out_dir: Path) -> dict:
+    """API 利用明細に載せるラベル・出力パス。"""
+    shop = (sheet.get("shop_info") or "").strip()
+    first = ""
+    for line in shop.splitlines():
+        s = line.strip()
+        if s:
+            first = s[:120]
+            break
+    lab = first or str(sheet.get("industry_label") or "").strip()
+    lab = lab[:120] if lab else ""
+    try:
+        out_s = str(out_dir.resolve())
+    except OSError:
+        out_s = str(out_dir)
+    return {"label": lab, "output_dir": out_s}
+
+
 def safe_site_dir_segment(sheet: dict) -> str:
     """出力サブフォルダ名用。店舗情報の先頭行などから派生。"""
     shop = (sheet.get("shop_info") or "").strip()
@@ -121,7 +229,7 @@ class LPBuilderApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("900x860")
+        self.geometry("920x900")
         self.minsize(800, 760)
         self.configure(bg=BG_DARK)
 
@@ -156,10 +264,16 @@ class LPBuilderApp(tk.Tk):
         )
         self.lp_template_var = tk.StringVar(value=_tpl_label)
         self.is_generating = False
+        self._generate_modal: tk.Toplevel | None = None
+        self._modal_progress_label: tk.Label | None = None
+        self._modal_progress_pb: ttk.Progressbar | None = None
         self._session_input_tokens = 0
         self._session_output_tokens = 0
         self._last_in = 0
         self._last_out = 0
+        self._last_auto_shop_text: str | None = None
+        self._last_auto_service_text: str | None = None
+        self._last_auto_selling_text: str | None = None
 
         cd = self.config_data
 
@@ -179,6 +293,8 @@ class LPBuilderApp(tk.Tk):
         self.jpy_per_usd_var = tk.StringVar(
             value="" if _jpy is None else str(_jpy).strip()
         )
+        self.cost_est_in_var = tk.StringVar(value="")
+        self.cost_est_out_var = tk.StringVar(value="")
 
         self._build_ui()
         self._apply_style()
@@ -209,18 +325,24 @@ class LPBuilderApp(tk.Tk):
                   foreground=[("selected", GOLD)])
 
         self.nb = ttk.Notebook(self)
-        self.nb.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
         self.tab_basic = self._make_tab("① 入力")
         self.tab_settings = self._make_tab("⚙ 設定")
-        self.tab_log = self._make_tab("④ ログ")
+        self.tab_cost = self._make_tab("💰 コスト・積算")
+        self.tab_log = self._make_tab("⑤ ログ")
 
         self._build_tab_basic()
         self._build_tab_settings()
+        self._build_tab_cost()
         self._build_tab_log()
 
-        # 下部：生成ボタン＋トークン概要
+        # 下部：生成ボタン＋トークン概要（後で先に bottom を pack して常にウィンドウ下端に確保）
         self._build_bottom()
+
+        # pack 順: ヘッダー ↑ / ノートブック が伸びる / 下端に生成・使用量を固定表示
+        # （ノートブックのみ先に expand すると、タブが高いと生成ボタンが画面外に押し出される）
+        self.bottom_bar.pack(side="bottom", fill="x", padx=16, pady=(0, 12))
+        self.nb.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
     def _make_tab(self, label):
         frame = tk.Frame(self.nb, bg=BG_INPUT)
@@ -272,7 +394,7 @@ class LPBuilderApp(tk.Tk):
             width=36,
         )
         self.cb_category.pack(side="left", padx=4)
-        self.cb_category.bind("<<ComboboxSelected>>", lambda _e: self._toggle_custom_industry_row())
+        self.cb_category.bind("<<ComboboxSelected>>", self._on_category_selected)
 
         self.custom_row = tk.Frame(inner, bg=BG_INPUT)
         tk.Label(self.custom_row, text="業種（自由入力）", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
@@ -366,6 +488,34 @@ class LPBuilderApp(tk.Tk):
             width=36,
         ).pack(side="left", padx=4)
 
+        self._apply_default_input_templates_if_applicable()
+
+    def _apply_default_input_templates_if_applicable(self) -> None:
+        """プリセット業種確定時、店舗／サービス／推しの各欄へテンプレを入れる（空または直前の自動文のときのみ上書き）。"""
+        cat = self.category_var.get()
+        if cat == CUSTOM_CATEGORY_LABEL:
+            return
+        tk = normalize_target_tier(self.target_tier_var.get())
+
+        def _fill(widget, sample: str | None, last_attr: str) -> None:
+            if not sample:
+                return
+            cur = widget.get("1.0", "end").strip()
+            last = getattr(self, last_attr)
+            if cur and cur != (last or ""):
+                return
+            widget.delete("1.0", "end")
+            widget.insert("1.0", sample)
+            setattr(self, last_attr, sample)
+
+        _fill(self.shop_text, default_shop_info_for(tk, cat), "_last_auto_shop_text")
+        _fill(self.service_text, default_service_summary_for(tk, cat), "_last_auto_service_text")
+        _fill(self.selling_text, default_selling_points_for(tk, cat), "_last_auto_selling_text")
+
+    def _on_category_selected(self, _evt=None):
+        self._toggle_custom_industry_row()
+        self._apply_default_input_templates_if_applicable()
+
     def _on_target_tier_changed(self, _evt=None):
         tk = normalize_target_tier(self.target_tier_var.get())
         labs = category_labels_for_tier(tk)
@@ -374,6 +524,7 @@ class LPBuilderApp(tk.Tk):
         if cur not in labs:
             self.category_var.set(labs[0])
         self._toggle_custom_industry_row()
+        self._apply_default_input_templates_if_applicable()
 
     def _toggle_custom_industry_row(self):
         if self.category_var.get() == CUSTOM_CATEGORY_LABEL:
@@ -443,7 +594,186 @@ class LPBuilderApp(tk.Tk):
                   bg=GOLD, fg=BG_DARK, relief="flat", font=FONT_H2,
                   cursor="hand2", padx=12, pady=6).pack(pady=20)
 
-    # ─── タブ⑤：ログ ─────────────────────────
+    # ─── タブ：コスト・積算 ────────────────────
+    def _build_tab_cost(self):
+        f = self.tab_cost
+        tk.Label(
+            f,
+            text="LP生成で API を呼ぶたび、トークン数・記録時点の単価・出力先などの明細を JSON に追記します。"
+            "下でファイルの集計・履歴・CSV 出力ができます。試算・直近表示は ⚙ 設定の単価・為替に基づきます（実請求はコンソール参照）。",
+            bg=BG_INPUT,
+            fg=FG_SUB,
+            font=("Segoe UI", 9),
+            wraplength=840,
+            justify="left",
+        ).pack(anchor="w", padx=16, pady=(16, 8))
+
+        self._section_label(f, "API利用明細（JSON）")
+        self.cost_ledger_path_label = tk.Label(
+            f,
+            text="",
+            bg=BG_INPUT,
+            fg=FG_SUB,
+            font=FONT_MONO,
+            wraplength=840,
+            justify="left",
+            anchor="w",
+        )
+        self.cost_ledger_path_label.pack(fill="x", padx=16, pady=(0, 4))
+        row_ld = tk.Frame(f, bg=BG_INPUT)
+        row_ld.pack(fill="x", padx=16, pady=(0, 8))
+        tk.Button(
+            row_ld,
+            text="再読込",
+            command=self._refresh_usage_ledger_panel,
+            bg=BG_PANEL,
+            fg=GOLD,
+            relief="flat",
+            font=FONT_BODY,
+            cursor="hand2",
+            padx=10,
+            pady=4,
+        ).pack(side="left", padx=(0, 6))
+        tk.Button(
+            row_ld,
+            text="JSON を別名保存…",
+            command=self._export_usage_ledger_json,
+            bg=BG_PANEL,
+            fg=GOLD,
+            relief="flat",
+            font=FONT_BODY,
+            cursor="hand2",
+            padx=10,
+            pady=4,
+        ).pack(side="left", padx=(0, 6))
+        tk.Button(
+            row_ld,
+            text="CSV 出力…",
+            command=self._export_usage_ledger_csv,
+            bg=BG_PANEL,
+            fg=GOLD,
+            relief="flat",
+            font=FONT_BODY,
+            cursor="hand2",
+            padx=10,
+            pady=4,
+        ).pack(side="left", padx=(0, 6))
+        tk.Button(
+            row_ld,
+            text="保存フォルダを開く",
+            command=self._open_usage_ledger_folder,
+            bg=BG_PANEL,
+            fg=GOLD,
+            relief="flat",
+            font=FONT_BODY,
+            cursor="hand2",
+            padx=10,
+            pady=4,
+        ).pack(side="left")
+
+        self.cost_ledger_summary = tk.Label(
+            f,
+            text="",
+            bg=BG_INPUT,
+            fg=FG_MAIN,
+            font=FONT_MONO,
+            wraplength=840,
+            justify="left",
+            anchor="w",
+        )
+        self.cost_ledger_summary.pack(fill="x", padx=16, pady=(0, 8))
+
+        tk.Label(
+            f,
+            text="直近の記録（最大25件・新しい順）",
+            bg=BG_INPUT,
+            fg=FG_SUB,
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", padx=16, pady=(0, 4))
+        self.cost_ledger_recent = scrolledtext.ScrolledText(
+            f,
+            height=11,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            font=FONT_MONO,
+            relief="flat",
+            wrap="word",
+            state="disabled",
+        )
+        self.cost_ledger_recent.pack(fill="both", expand=False, padx=16, pady=(0, 16))
+
+        self._section_label(f, "適用単価（⚙ 設定と同期）")
+        self.cost_price_summary = tk.Label(
+            f,
+            text="",
+            bg=BG_INPUT,
+            fg=FG_MAIN,
+            font=FONT_BODY,
+            wraplength=840,
+            justify="left",
+            anchor="w",
+        )
+        self.cost_price_summary.pack(fill="x", padx=16, pady=(0, 12))
+
+        self._section_label(f, "直近1回の積算（API 応答トークン）")
+        self.cost_last_text = tk.Text(
+            f,
+            height=9,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            font=FONT_MONO,
+            relief="flat",
+            wrap="word",
+            state="disabled",
+            cursor="arrow",
+        )
+        self.cost_last_text.pack(fill="x", padx=16, pady=(0, 12))
+
+        self._section_label(f, "この起動中の累計積算")
+        self.cost_session_text = tk.Text(
+            f,
+            height=9,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            font=FONT_MONO,
+            relief="flat",
+            wrap="word",
+            state="disabled",
+            cursor="arrow",
+        )
+        self.cost_session_text.pack(fill="x", padx=16, pady=(0, 12))
+
+        self._section_label(f, "想定トークンで試算")
+        tk.Label(
+            f,
+            text="任意の入力・出力トークン数で、同じ単価を適用したときの概算を出します。",
+            bg=BG_INPUT,
+            fg=FG_SUB,
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", padx=16)
+        row_e = tk.Frame(f, bg=BG_INPUT)
+        row_e.pack(fill="x", padx=16, pady=6)
+        tk.Label(row_e, text="入力トークン", width=14, anchor="w",
+                 bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        tk.Entry(row_e, textvariable=self.cost_est_in_var, bg=BG_PANEL, fg=FG_MAIN,
+                 insertbackground=FG_MAIN, relief="flat", font=FONT_BODY, width=16).pack(side="left", padx=4)
+        tk.Label(row_e, text="出力トークン", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left", padx=(16, 0))
+        tk.Entry(row_e, textvariable=self.cost_est_out_var, bg=BG_PANEL, fg=FG_MAIN,
+                 insertbackground=FG_MAIN, relief="flat", font=FONT_BODY, width=16).pack(side="left", padx=4)
+
+        self.cost_estimate_result = tk.Label(
+            f,
+            text="",
+            bg=BG_INPUT,
+            fg=GOLD,
+            font=FONT_MONO,
+            wraplength=840,
+            justify="left",
+            anchor="w",
+        )
+        self.cost_estimate_result.pack(fill="x", padx=16, pady=(8, 16))
+
+    # ─── タブ：ログ ───────────────────────────
     def _build_tab_log(self):
         f = self.tab_log
         tk.Label(
@@ -468,10 +798,9 @@ class LPBuilderApp(tk.Tk):
 
     # ─── 下部：生成ボタン＋使用量 ───────────────
     def _build_bottom(self):
-        bottom = tk.Frame(self, bg=BG_DARK)
-        bottom.pack(fill="x", padx=16, pady=(0, 12))
+        self.bottom_bar = tk.Frame(self, bg=BG_DARK)
 
-        btn_frame = tk.Frame(bottom, bg=BG_DARK)
+        btn_frame = tk.Frame(self.bottom_bar, bg=BG_DARK)
         btn_frame.pack(fill="x", pady=4)
 
         self.gen_btn = tk.Button(
@@ -499,7 +828,7 @@ class LPBuilderApp(tk.Tk):
         )
         self.status_label.pack(side="right", padx=8)
 
-        usage_frame = tk.Frame(bottom, bg=BG_DARK)
+        usage_frame = tk.Frame(self.bottom_bar, bg=BG_DARK)
         usage_frame.pack(fill="x", pady=(8, 0))
         tk.Label(
             usage_frame,
@@ -518,6 +847,315 @@ class LPBuilderApp(tk.Tk):
             anchor="w",
         )
         self.usage_label.pack(fill="x", pady=(2, 0))
+
+    # ─── API利用明細 JSON ─────────────────────
+    def _usage_ledger_path(self) -> Path:
+        return USAGE_LEDGER_JSON
+
+    def _load_usage_ledger_raw(self) -> dict:
+        p = self._usage_ledger_path()
+        if not p.is_file():
+            return {"version": 1, "entries": []}
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {"version": 1, "entries": []}
+        if not isinstance(data, dict):
+            return {"version": 1, "entries": []}
+        ent = data.get("entries")
+        if not isinstance(ent, list):
+            ent = []
+        data["entries"] = ent
+        data.setdefault("version", 1)
+        return data
+
+    def _save_usage_ledger_raw(self, data: dict) -> None:
+        p = self._usage_ledger_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(p)
+
+    def _append_usage_ledger_entry(self, result: dict, meta: dict | None) -> None:
+        tin = int(result.get("input_tokens") or 0)
+        tout = int(result.get("output_tokens") or 0)
+        if not tin and not tout:
+            return
+        pin, pout = self._parse_mt_prices()
+        err = result.get("error")
+        entry = {
+            "id": f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:10]}",
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "model": CLAUDE_LP_MODEL,
+            "input_tokens": tin,
+            "output_tokens": tout,
+            "total_tokens": tin + tout,
+            "error": err,
+            "label": (meta or {}).get("label") or "",
+            "output_dir": (meta or {}).get("output_dir") or "",
+            "price_input_per_mtok": pin,
+            "price_output_per_mtok": pout,
+        }
+        data = self._load_usage_ledger_raw()
+        data.setdefault("entries", []).append(entry)
+        try:
+            self._save_usage_ledger_raw(data)
+        except OSError as e:
+            self._log(f"API利用明細の保存に失敗しました: {e}", RED_ERR)
+
+    def _refresh_usage_ledger_panel(self) -> None:
+        if not getattr(self, "cost_ledger_path_label", None):
+            return
+        p = self._usage_ledger_path()
+        self.cost_ledger_path_label.config(text=f"保存ファイル: {p}")
+
+        data = self._load_usage_ledger_raw()
+        entries = data.get("entries") or []
+        n = len(entries)
+        si = so = 0
+        for e in entries:
+            si += int(e.get("input_tokens") or 0)
+            so += int(e.get("output_tokens") or 0)
+
+        pin, pout = self._parse_mt_prices()
+        jpy = self._parse_jpy_optional()
+        lines = [
+            f"── ファイル集計（全 {n} 件）──",
+            f"  累計トークン  入力 {si:,} / 出力 {so:,} ・ 合計 {si + so:,}",
+        ]
+        if pin is not None and pout is not None:
+            usd = self._usd_cost(si, so, pin, pout)
+            lines.append(f"  現在の設定単価での概算  ${usd:.6f} USD")
+            if jpy is not None:
+                lines.append(f"  （1 USD = {jpy:g} 円）  約 ¥{usd * jpy:,.4f}")
+            lines.append("  ※単価は変更可能のため、過去分の実請求額とは一致しない場合があります。")
+        else:
+            lines.append("  概算: ⚙ 設定タブで単価を入れると USD 換算が表示されます。")
+
+        self.cost_ledger_summary.config(text="\n".join(lines))
+
+        recent_lines: list[str] = []
+        for e in reversed(entries[-25:]):
+            ts = e.get("ts") or "—"
+            it = int(e.get("input_tokens") or 0)
+            ot = int(e.get("output_tokens") or 0)
+            lab = (e.get("label") or "").replace("\n", " ")
+            if len(lab) > 48:
+                lab = lab[:45] + "..."
+            er = e.get("error")
+            flag = "ERR" if er else "OK"
+            recent_lines.append(f"{ts}  {flag}  in {it:,} / out {ot:,}  {lab}")
+        recent_txt = "\n".join(recent_lines) if recent_lines else "（まだ記録がありません。LP生成が成功しトークンが返った呼び出しから追記されます。）"
+        self.cost_ledger_recent.config(state="normal")
+        self.cost_ledger_recent.delete("1.0", "end")
+        self.cost_ledger_recent.insert("1.0", recent_txt)
+        self.cost_ledger_recent.config(state="disabled")
+
+    def _export_usage_ledger_json(self) -> None:
+        data = self._load_usage_ledger_raw()
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json"), ("すべて", "*.*")],
+            initialfile="lp_builder_api_usage.json",
+        )
+        if path:
+            try:
+                Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                messagebox.showinfo("エクスポート完了", f"保存しました:\n{path}")
+            except OSError as e:
+                messagebox.showerror("エラー", f"保存できませんでした:\n{e}")
+
+    def _export_usage_ledger_csv(self) -> None:
+        data = self._load_usage_ledger_raw()
+        entries = data.get("entries") or []
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("すべて", "*.*")],
+            initialfile="api_usage_ledger.csv",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as fp:
+                w = csv.writer(fp)
+                w.writerow(
+                    [
+                        "ts",
+                        "id",
+                        "model",
+                        "input_tokens",
+                        "output_tokens",
+                        "total_tokens",
+                        "label",
+                        "output_dir",
+                        "error",
+                        "price_input_per_mtok",
+                        "price_output_per_mtok",
+                    ]
+                )
+                for e in entries:
+                    w.writerow(
+                        [
+                            e.get("ts"),
+                            e.get("id"),
+                            e.get("model"),
+                            e.get("input_tokens"),
+                            e.get("output_tokens"),
+                            e.get("total_tokens"),
+                            e.get("label"),
+                            e.get("output_dir"),
+                            e.get("error"),
+                            e.get("price_input_per_mtok"),
+                            e.get("price_output_per_mtok"),
+                        ]
+                    )
+            messagebox.showinfo("エクスポート完了", f"保存しました:\n{path}")
+        except OSError as ex:
+            messagebox.showerror("エラー", f"保存できませんでした:\n{ex}")
+
+    def _open_usage_ledger_folder(self) -> None:
+        folder = self._usage_ledger_path().parent
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(folder))  # noqa: S606
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(folder)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(folder)], check=False)
+        except Exception as e:
+            messagebox.showerror("エラー", f"フォルダを開けませんでした:\n{e}")
+
+    # ─── コストタブ更新 ───────────────────────
+    @staticmethod
+    def _set_readonly_text(widget: tk.Text, content: str) -> None:
+        widget.config(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", content)
+        widget.config(state="disabled")
+
+    def _fmt_cost_breakdown_detail(
+        self,
+        label: str,
+        in_tok: int,
+        out_tok: int,
+        pin: float | None,
+        pout: float | None,
+        jpy: float | None,
+    ) -> str:
+        if pin is None or pout is None:
+            return (
+                "⚙ 設定タブで「入力 $/100万tok」「出力 $/100万tok」を入力すると、\n"
+                "ドル・円での積算が表示されます。\n"
+            )
+        usd_in = (in_tok / 1_000_000.0) * pin
+        usd_out = (out_tok / 1_000_000.0) * pout
+        total_usd = usd_in + usd_out
+        lines = [
+            f"{label}",
+            "",
+            f"  入力トークン      {in_tok:>14,}  ×  ${pin:.4f} /100万  =  ${usd_in:.6f}",
+            f"  出力トークン      {out_tok:>14,}  ×  ${pout:.4f} /100万  =  ${usd_out:.6f}",
+            f"  {'─' * 58}",
+            f"  合計（USD）                                       ${total_usd:.6f}",
+        ]
+        if jpy is not None:
+            lines.append(f"  合計（円・1 USD = {jpy:g} 円）               ¥{total_usd * jpy:,.4f}")
+        lines.extend(["", "  ※ 実請求は Anthropic Console の Usage / Billing を参照してください。"])
+        return "\n".join(lines)
+
+    def _refresh_cost_tab(self) -> None:
+        if not getattr(self, "cost_last_text", None):
+            return
+        pin, pout = self._parse_mt_prices()
+        jpy = self._parse_jpy_optional()
+
+        if pin is None or pout is None:
+            self.cost_price_summary.config(
+                text="適用単価: 未設定です。⚙ 設定タブで「入力・出力の $/100万トークン」を入力し、「設定を保存」してください。"
+            )
+        else:
+            jp_s = f"　｜　為替: 1 USD = {jpy:g} 円（任意）" if jpy is not None else "　｜　為替: 未入力（円は表示されません）"
+            self.cost_price_summary.config(
+                text=(
+                    f"入力 ${pin:.4f} / 100万トークン　・　出力 ${pout:.4f} / 100万トークン{jp_s}"
+                )
+            )
+
+        if self._last_in == 0 and self._last_out == 0:
+            last_txt = (
+                "まだ LP 生成の記録がありません。\n\n"
+                "「LP を生成する」を実行すると、直前1回分のトークンからここに積算されます。"
+            )
+        else:
+            last_txt = self._fmt_cost_breakdown_detail(
+                "■ 直近1回",
+                self._last_in,
+                self._last_out,
+                pin,
+                pout,
+                jpy,
+            )
+
+        if self._session_input_tokens == 0 and self._session_output_tokens == 0:
+            sess_txt = (
+                "この起動中はまだ生成がありません。\n\n"
+                "同一セッションで複数回生成すると、ここに累計トークンからの積算が表示されます。"
+            )
+        else:
+            sess_txt = self._fmt_cost_breakdown_detail(
+                "■ この起動中の累計",
+                self._session_input_tokens,
+                self._session_output_tokens,
+                pin,
+                pout,
+                jpy,
+            )
+
+        self._set_readonly_text(self.cost_last_text, last_txt)
+        self._set_readonly_text(self.cost_session_text, sess_txt)
+        self._refresh_cost_estimate()
+        self._refresh_usage_ledger_panel()
+
+    def _refresh_cost_estimate(self) -> None:
+        if not getattr(self, "cost_estimate_result", None):
+            return
+        pin, pout = self._parse_mt_prices()
+        jpy = self._parse_jpy_optional()
+        try:
+            raw_i = self.cost_est_in_var.get().replace(",", "").strip()
+            raw_o = self.cost_est_out_var.get().replace(",", "").strip()
+            ei = int(raw_i) if raw_i else 0
+            eo = int(raw_o) if raw_o else 0
+            if ei < 0 or eo < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            self.cost_estimate_result.config(
+                text="試算: トークン数は 0 以上の整数で入力してください。",
+                fg=RED_ERR,
+            )
+            return
+
+        if pin is None or pout is None:
+            self.cost_estimate_result.config(
+                text="試算: ⚙ 設定タブで単価を入力してください。",
+                fg=FG_SUB,
+            )
+            return
+
+        usd = self._usd_cost(ei, eo, pin, pout)
+        lines = [
+            f"試算コスト（入力 {ei:,} / 出力 {eo:,} トークン）",
+            f"  概算 USD:  ${usd:.6f}",
+        ]
+        if jpy is not None:
+            lines.append(f"  概算 JPY:  ¥{usd * jpy:,.4f}（1 USD = {jpy:g} 円）")
+        else:
+            lines.append("  円換算: 為替レート未入力のため USD のみ表示しています。")
+        self.cost_estimate_result.config(text="\n".join(lines), fg=GOLD)
 
     # ─── ヘルパー ─────────────────────────────
     def _section_label(self, parent, text):
@@ -575,7 +1213,13 @@ class LPBuilderApp(tk.Tk):
         def _go(*_args):
             self.after_idle(self._refresh_usage_display)
 
-        for v in (self.price_in_var, self.price_out_var, self.jpy_per_usd_var):
+        for v in (
+            self.price_in_var,
+            self.price_out_var,
+            self.jpy_per_usd_var,
+            self.cost_est_in_var,
+            self.cost_est_out_var,
+        ):
             v.trace_add("write", _go)
 
     def _usage_display_text(
@@ -630,8 +1274,9 @@ class LPBuilderApp(tk.Tk):
                 jpy,
             )
         )
+        self._refresh_cost_tab()
 
-    def _apply_usage_stats(self, result: dict) -> None:
+    def _apply_usage_stats(self, result: dict, meta: dict | None = None) -> None:
         """generate_lp の戻り値からトークン表示を更新（メインスレッド専用）"""
         tin = int(result.get("input_tokens") or 0)
         tout = int(result.get("output_tokens") or 0)
@@ -640,16 +1285,141 @@ class LPBuilderApp(tk.Tk):
             self._session_output_tokens += tout
             self._last_in = tin
             self._last_out = tout
+            self._append_usage_ledger_entry(result, meta)
         self._refresh_usage_display()
 
     def _log(self, msg, color=None):
+        """ログとステータスを更新。ワーカースレッドから呼んでもメインスレッドで実行される。"""
+        if threading.current_thread() is not threading.main_thread():
+            self.after(0, lambda m=msg, c=color: self._log(m, c))
+            return
         self.log_box.config(state="normal")
         ts = datetime.now().strftime("%H:%M:%S")
         self.log_box.insert("end", f"[{ts}] {msg}\n")
         self.log_box.see("end")
         self.log_box.config(state="disabled")
         self.status_label.config(text=msg[:60])
+        self._update_generate_modal_text(msg)
         self.update_idletasks()
+
+    def _open_generate_modal(self) -> None:
+        """LP生成中のモーダル（不定プログレス＋メッセージ）。生成開始時のみメインスレッドから呼ぶ。"""
+        self._close_generate_modal()
+        top = tk.Toplevel(self)
+        top.title("LP 生成中")
+        top.configure(bg=BG_PANEL)
+        top.resizable(False, False)
+        top.transient(self)
+        margin = tk.Frame(top, bg=BG_PANEL, padx=28, pady=22)
+        margin.pack(fill="both", expand=True)
+        tk.Label(
+            margin,
+            text="LP を生成しています",
+            font=FONT_H2,
+            bg=BG_PANEL,
+            fg=GOLD,
+        ).pack(anchor="w")
+        tk.Label(
+            margin,
+            text="Claude API の応答を待っています。完了までこのままにしてください。",
+            font=("Segoe UI", 9),
+            bg=BG_PANEL,
+            fg="#d0d0d0",
+            wraplength=400,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 12))
+        # 不定プログレスのトラックとバーのコントラストを上げる（既定の薄灰×薄灰だと視認性が悪い）
+        _pb_style = ttk.Style(self)
+        _lp_pb = "LpModal.Horizontal.TProgressbar"
+        try:
+            _base = "Horizontal.TProgressbar"
+            try:
+                _lay = _pb_style.layout(_base)
+                if _lay:
+                    _pb_style.layout(_lp_pb, _lay)
+            except tk.TclError:
+                pass
+            _pb_style.configure(
+                _lp_pb,
+                troughcolor="#141414",
+                background=GOLD,
+                bordercolor="#141414",
+                lightcolor="#f0dfa0",
+                darkcolor=GOLD_DARK,
+                thickness=14,
+            )
+        except tk.TclError:
+            _lp_pb = "Horizontal.TProgressbar"
+        pb = ttk.Progressbar(
+            margin,
+            mode="indeterminate",
+            length=400,
+            maximum=100,
+            style=_lp_pb,
+        )
+        pb.pack(fill="x", pady=(0, 10))
+        pb.start(14)
+        self._modal_progress_pb = pb
+        lbl = tk.Label(
+            margin,
+            text="準備中…",
+            font=FONT_MONO,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            wraplength=420,
+            justify="left",
+        )
+        lbl.pack(anchor="w")
+        self._modal_progress_label = lbl
+        self._generate_modal = top
+        top.protocol("WM_DELETE_WINDOW", self._on_generate_modal_close_attempt)
+        top.grab_set()
+        self.update_idletasks()
+        top.update_idletasks()
+        px = self.winfo_rootx() + max(20, (self.winfo_width() - 460) // 2)
+        py = self.winfo_rooty() + max(40, self.winfo_height() // 5)
+        top.geometry(f"480x220+{px}+{py}")
+
+    def _on_generate_modal_close_attempt(self) -> None:
+        messagebox.showinfo(
+            "生成中",
+            "LP の生成が完了するまでお待ちください。",
+            parent=self._generate_modal,
+        )
+
+    def _update_generate_modal_text(self, msg: str) -> None:
+        lbl = getattr(self, "_modal_progress_label", None)
+        if lbl is None:
+            return
+        try:
+            if lbl.winfo_exists():
+                lbl.config(text=(msg or "")[:300])
+        except tk.TclError:
+            pass
+
+    def _close_generate_modal(self) -> None:
+        """生成終了時にモーダルを閉じる（メインスレッドから）。"""
+        pb = getattr(self, "_modal_progress_pb", None)
+        if pb is not None:
+            try:
+                pb.stop()
+            except tk.TclError:
+                pass
+        self._modal_progress_pb = None
+        self._modal_progress_label = None
+        top = getattr(self, "_generate_modal", None)
+        self._generate_modal = None
+        if top is None:
+            return
+        try:
+            if top.winfo_exists():
+                try:
+                    top.grab_release()
+                except tk.TclError:
+                    pass
+                top.destroy()
+        except tk.TclError:
+            pass
 
     def _collect_sheet(self) -> dict:
         """GUIの入力値を辞書にまとめる（業種は UI で確定済み）"""
@@ -728,6 +1498,7 @@ class LPBuilderApp(tk.Tk):
 
         self.is_generating = True
         self.gen_btn.config(state="disabled", text="  生成中...  ", bg=BG_PANEL, fg=FG_SUB)
+        self._open_generate_modal()
         sheet = self._collect_sheet()
         threading.Thread(target=self._generate_thread, args=(sheet, api_key), daemon=True).start()
 
@@ -759,18 +1530,26 @@ class LPBuilderApp(tk.Tk):
         self._log("INPUT_SHEET.md を保存しました")
 
         # Claude API 呼び出し
+        meta = _usage_meta_from_sheet(sheet, out_dir)
         result = generate_lp(sheet, api_key, on_progress=self._log)
-        self.after(0, lambda r=result: self._apply_usage_stats(r))
+        self.after(0, lambda r=result, m=meta: self._apply_usage_stats(r, m))
 
         if result["error"]:
             self._log(f"エラー: {result['error']}", RED_ERR)
             self.after(0, self._on_generate_done, False, str(out_dir))
             return
 
-        # index.html 保存
+        # index.html 保存（キャッシュバスト: 同梱 CSS/JS の参照に ?v= を付与）
         html_path = out_dir / "index.html"
-        html_path.write_text(result["html"], encoding="utf-8")
-        self._log(f"index.html を保存しました（{len(result['html']):,} 文字）")
+        cache_ver = ts.replace("_", "")
+        raw_html = _strip_navbar_inline_styles(result["html"])
+        html_final = _inject_asset_cache_bust(raw_html, cache_ver)
+        html_path.write_text(html_final, encoding="utf-8")
+        self._log(
+            f"index.html を保存しました（{len(html_final):,} 文字・style/script に ?v={cache_ver}）"
+        )
+        for w in _hash_anchor_mismatches(html_final):
+            self._log(f"アンカー確認: {w}", WARN_MSG)
 
         # 共有ファイルをコピー（選択テーマの style.css を style.css 名で配置）
         self._copy_shared_files(out_dir, sheet)
@@ -866,6 +1645,7 @@ class LPBuilderApp(tk.Tk):
 
     def _on_generate_done(self, success: bool, out_dir: str):
         self.is_generating = False
+        self._close_generate_modal()
         self.gen_btn.config(state="normal", text="  ▶  LP を生成する  ", bg=GOLD, fg=BG_DARK)
         if success:
             preview_url = self._open_local_preview(out_dir)
@@ -882,7 +1662,7 @@ class LPBuilderApp(tk.Tk):
             self._focus_log_tab()
             messagebox.showerror(
                 "生成失敗",
-                "LP生成中にエラーが発生しました。\n\n「④ ログ」タブに詳細を表示しました。",
+                "LP生成中にエラーが発生しました。\n\n「⑤ ログ」タブに詳細を表示しました。",
             )
 
     def _save_input_sheet(self):
@@ -932,8 +1712,57 @@ class LPBuilderApp(tk.Tk):
         style = ttk.Style()
         style.configure("TScrollbar", background=BG_PANEL, troughcolor=BG_DARK,
                         arrowcolor=FG_SUB, borderwidth=0)
-        style.configure("TCombobox", fieldbackground=BG_PANEL, background=BG_PANEL,
-                        foreground=FG_MAIN, selectbackground=GOLD, selectforeground=BG_DARK)
+
+        # Combobox（readonly）：Windows などで field が明色・文字が薄くなる対策
+        _cbf, _cfg = BG_PANEL, FG_MAIN
+        style.configure(
+            "TCombobox",
+            fieldbackground=_cbf,
+            background=_cbf,
+            foreground=_cfg,
+            arrowcolor=GOLD,
+            borderwidth=1,
+            selectbackground=GOLD,
+            selectforeground=BG_DARK,
+            padding=(6, 4),
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[
+                ("readonly", _cbf),
+                ("disabled", BG_PANEL),
+                ("focus", _cbf),
+                ("active", _cbf),
+            ],
+            foreground=[
+                ("readonly", _cfg),
+                ("disabled", FG_SUB),
+                ("focus", _cfg),
+                ("active", _cfg),
+            ],
+            background=[
+                ("readonly", _cbf),
+                ("focus", _cbf),
+                ("active", _cbf),
+            ],
+            arrowcolor=[
+                ("readonly", GOLD),
+                ("disabled", FG_SUB),
+            ],
+        )
+        # ドロップダウン一覧（環境によっては別要素）
+        for lb in ("ComboboxPopdown.Listbox", "Combobox.dropdown"):
+            try:
+                style.configure(
+                    lb,
+                    background=BG_PANEL,
+                    foreground=FG_MAIN,
+                    selectbackground=GOLD,
+                    selectforeground=BG_DARK,
+                    fieldbackground=BG_PANEL,
+                )
+            except tk.TclError:
+                pass
 
 
 # ─────────────────────────────────────────────

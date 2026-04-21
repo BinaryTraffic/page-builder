@@ -18,6 +18,9 @@ from prompt_template import (
 # 課金はこの数値ではなく実際の入出力トークン（max_tokens を満額使っても丸ごと請求されるわけではない）
 _OUTPUT_CAPS = (128_000, 64_000, 32_768)
 
+# LP 生成で用いるモデル（利用明細 JSON と揃える）
+CLAUDE_LP_MODEL = "claude-opus-4-5"
+
 
 def generate_lp(sheet: dict, api_key: str, on_progress=None) -> dict:
     """
@@ -51,7 +54,7 @@ def generate_lp(sheet: dict, api_key: str, on_progress=None) -> dict:
         for cap in _OUTPUT_CAPS:
             try:
                 with client.messages.stream(
-                    model="claude-opus-4-5",
+                    model=CLAUDE_LP_MODEL,
                     max_tokens=cap,
                     system=system_prompt,
                     messages=[{"role": "user", "content": user_prompt}],

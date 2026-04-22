@@ -29,7 +29,12 @@
 
     <section class="card hidden" id="siteCard">
       <h2>編集するLPを選択</h2>
-      <p class="note">`?site_key=` では切り替えず、必ずここで選択してセッションに保存します。</p>
+      <p class="note">
+        手動: 上で選んで「このLPで作業」。クライアントから
+        <code>/cms/admin/?site_key=（作成した site_key）</code>
+        を開くと、ログイン後（または既にログイン中なら起動直後）に
+        自動で <code>POST select-site</code> し編集画面へ遷移します。サーバは GET だけでは切り替えません。
+      </p>
       <label>LP（site_key）
         <select id="siteKeySelect"></select>
       </label>

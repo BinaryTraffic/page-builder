@@ -17,7 +17,7 @@ Last updated: 2026-04-23 05:53:08 +09:00
   - `POST /cms/api/logout.php`
   - `GET /cms/api/me.php`（`allowed_site_keys` / `active_site_key` / `sites` 等）
   - `POST /cms/api/change-password.php`（初回一時パスワード→本番用へ変更）
-  - `POST /cms/api/select-site.php`（**セッション**に編集対象 LP を確定。`?site_key=` では切替えない）
+  - `POST /cms/api/select-site.php`（**セッション**に編集対象 LP を確定。API 単体の GET では切替えない）
   - `GET` / `PUT /cms/api/content.php`（LP ごとの body。未選択は `site_not_selected`）
   - `POST /cms/api/upload-image.php`（任意。`<site_key>/custom/` へ保存）
   - `POST /cms/api/register-site.php`（台帳＋自ユーザ `allowed` 追記。任意）
@@ -25,6 +25,9 @@ Last updated: 2026-04-23 05:53:08 +09:00
   - ログイン
   - 画像/文言編集
   - `content.json` 保存
+- **管理画面のディープリンク（クライアントから開く）**
+  - 例: `GET /cms/admin/?site_key=作成した site_key`（別名: `for_site`）
+  - ブラウザは **ログイン完了後**（または既存セッションで開いた直後）に、内部で `POST /cms/api/select-site.php` を1回投げ、編集画面を開く。サーバが GET だけで `active_site_key` を変えることはない。
 
 ---
 

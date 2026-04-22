@@ -26,6 +26,24 @@ const editorCard = document.getElementById("editorCard");
 const statusEl = document.getElementById("status");
 const siteKeySelect = document.getElementById("siteKeySelect");
 
+/** クライアント等から `/cms/admin/?site_key=...` で開いたとき用（サーバは GET では切替えない。認可後に POST のみ） */
+function readPendingSiteKeyFromUrl() {
+  const p = new URLSearchParams(window.location.search);
+  return (p.get("site_key") || p.get("for_site") || "").trim();
+}
+
+let pendingSiteKeyFromUrl = readPendingSiteKeyFromUrl();
+
+function stripSiteKeyQueryFromAddressBar() {
+  if (!pendingSiteKeyFromUrl) return;
+  const u = new URL(window.location.href);
+  u.searchParams.delete("site_key");
+  u.searchParams.delete("for_site");
+  const q = u.searchParams.toString();
+  window.history.replaceState({}, "", u.pathname + (q ? `?${q}` : "") + u.hash);
+  pendingSiteKeyFromUrl = "";
+}
+
 function setStatus(text) {
   statusEl.textContent = text;
 }
@@ -75,6 +93,13 @@ function fillSiteSelect(sites) {
   });
 }
 
+async function postSelectSite(siteKey) {
+  return api("/cms/api/select-site.php", {
+    method: "POST",
+    body: JSON.stringify({ site_key: siteKey })
+  });
+}
+
 async function loadContent() {
   const data = await api("/cms/api/content.php", { method: "GET" });
   document.getElementById("heroImage").value = data.images?.hero || "";
@@ -90,6 +115,56 @@ async function applyMeData(data) {
   csrf = data.csrf || "";
   if (data.user?.must_change_password) {
     showOnly(passwordCard);
+    return;
+  }
+  if (pendingSiteKeyFromUrl) {
+    const want = pendingSiteKeyFromUrl;
+    if (data.active_site_key === want) {
+      stripSiteKeyQueryFromAddressBar();
+      showOnly(editorCard);
+      try {
+        await loadContent();
+      } catch (e) {
+        if (e.code === "site_not_selected" || e.code === "invalid_site_session") {
+          const me2 = await api("/cms/api/me.php", { method: "GET" });
+          await applyMeData(me2);
+        } else {
+          alert(errMessage(e));
+        }
+      }
+      return;
+    }
+    const allowed = (data.sites || []).some(
+      (s) => (s.site_key || s.sitekey) === want
+    );
+    if (!allowed) {
+      setStatus(
+        `URL で指定した site_key はこのアカウントで利用できません: ${want}`
+      );
+      stripSiteKeyQueryFromAddressBar();
+      fillSiteSelect(data.sites);
+      showOnly(siteCard);
+      return;
+    }
+    try {
+      const d = await postSelectSite(want);
+      csrf = d.csrf || csrf;
+      stripSiteKeyQueryFromAddressBar();
+      showOnly(editorCard);
+      await loadContent();
+    } catch (e) {
+      stripSiteKeyQueryFromAddressBar();
+      alert(errMessage(e));
+      fillSiteSelect(data.sites);
+      if (data.sites && data.sites.length) {
+        showOnly(siteCard);
+      } else {
+        setStatus(
+          "利用可能なLPがありません。サーバーの台帳と allowed_site_keys を確認してください。"
+        );
+        showOnly(siteCard);
+      }
+    }
     return;
   }
   if (!data.active_site_key) {
@@ -182,10 +257,7 @@ document.getElementById("selectSiteBtn").addEventListener("click", async () => {
     return;
   }
   try {
-    const d = await api("/cms/api/select-site.php", {
-      method: "POST",
-      body: JSON.stringify({ site_key: siteKey })
-    });
+    const d = await postSelectSite(siteKey);
     csrf = d.csrf || csrf;
     showOnly(editorCard);
     await loadContent();

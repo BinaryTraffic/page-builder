@@ -302,6 +302,10 @@ def safe_site_dir_segment(sheet: dict) -> str:
     for c in '<>:"/\\|?*':
         raw = raw.replace(c, "_")
     raw = raw.replace(" ", "_").lower()
+    # 先頭1行が長文でも、公開URLの1セグメントが読めない長さにならないよう字数目で上限
+    _max_slug_chars = 32
+    if len(raw) > _max_slug_chars:
+        raw = raw[:_max_slug_chars].rstrip("._-")
     # _ + 日時(15) + _ + lp_token(24hex) = 41 バイト（ASCII）
     _reserved = 1 + 15 + 1 + 24
     raw = _truncate_utf8_bytes(raw, 255 - _reserved)
@@ -407,8 +411,9 @@ class LPBuilderApp(tk.Tk):
         self.sftp_edit_btn: tk.Button | None = None
         self._last_generated_out_dir: str = ""
         self._last_generated_sheet: dict | None = None
+        self._last_site_key: str = str(cd0.get("last_site_key", "") or "").strip()
         _route = self.sftp_route_url_var.get().strip().rstrip("/")
-        self.cms_editor_url_var = tk.StringVar(value=(f"{_route}/cms/admin/" if _route else ""))
+        self.cms_editor_url_var = tk.StringVar(value="")
         self.cms_admin_user_var = tk.StringVar(value=str(env.get("CMS_ADMIN_USER") or cd.get("cms_admin_user", "lp-admin")).strip())
         self.cms_admin_pass_var = tk.StringVar(value=str(env.get("CMS_ADMIN_TEMP_PASS") or cd.get("cms_admin_temp_pass", "<SET_NEW_PASSWORD_HERE>")).strip())
         self.sftp_route_url_var.trace_add("write", lambda *_: self._refresh_cms_editor_url())
@@ -420,6 +425,7 @@ class LPBuilderApp(tk.Tk):
 
         self._preview_httpd: http.server.HTTPServer | None = None
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._refresh_cms_editor_url()
 
     # ─── UI構築 ───────────────────────────────
     def _build_ui(self):
@@ -2134,6 +2140,7 @@ class LPBuilderApp(tk.Tk):
         self.gen_btn.config(state="normal", text="  ▶  LP を生成する  ", bg=GOLD, fg=BG_DARK)
         if success:
             self._last_generated_out_dir = out_dir
+            self._set_last_site_key(str(Path(out_dir).name))
             preview_url = self._open_local_preview(out_dir)
             msg_extra = (
                 f"\nプレビュー:\n{preview_url}\n"
@@ -2182,6 +2189,7 @@ class LPBuilderApp(tk.Tk):
             "sftp_route_url": self.sftp_route_url_var.get().strip(),
             "cms_admin_user": self.cms_admin_user_var.get().strip(),
             "cms_admin_temp_pass": self.cms_admin_pass_var.get().strip(),
+            "last_site_key": self._last_site_key,
             "lp_template": normalize_lp_template_key(
                 LP_TEMPLATE_LABEL_TO_KEY.get(self.lp_template_var.get())
             ),
@@ -2331,9 +2339,33 @@ class LPBuilderApp(tk.Tk):
         if not silent:
             messagebox.showinfo("保存完了", f"SFTP設定を .env に保存しました。\n{ENV_FILE}")
 
+    def _set_last_site_key(self, site_key: str) -> None:
+        """直近の LP フォルダ名。CMS を ?site_key= で開く用。"""
+        self._last_site_key = (site_key or "").strip()
+        self._refresh_cms_editor_url()
+        try:
+            data = dict(self._load_config())
+        except Exception:
+            return
+        data["last_site_key"] = self._last_site_key
+        self.config_data = data
+        try:
+            CONFIG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
     def _refresh_cms_editor_url(self) -> None:
         route = (self.sftp_route_url_var.get() or "").strip().rstrip("/")
-        self.cms_editor_url_var.set(f"{route}/cms/admin/" if route else "")
+        if not route:
+            self.cms_editor_url_var.set("")
+            return
+        base = f"{route}/cms/admin/"
+        sk = (self._last_site_key or "").strip()
+        if sk:
+            q = urllib.parse.urlencode({"site_key": sk})
+            self.cms_editor_url_var.set(f"{base}?{q}")
+        else:
+            self.cms_editor_url_var.set(base)
 
     def _test_sftp_connection(self) -> None:
         host = self.sftp_host_var.get().strip()
@@ -2543,6 +2575,7 @@ class LPBuilderApp(tk.Tk):
             cli.close()
             public_url = f"{route}/{site_key}/index.html" if route else f"/{site_key}/index.html"
             self.sftp_link_var.set(public_url)
+            self._set_last_site_key(site_key)
             self._log(f"SFTPアップロード完了: {public_url}", GREEN_OK)
             messagebox.showinfo("アップロード完了", f"アップロードが完了しました。\n\n{public_url}")
             try:

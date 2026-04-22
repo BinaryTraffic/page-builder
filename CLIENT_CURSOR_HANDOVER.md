@@ -9,7 +9,7 @@
 | 用途 | URL |
 |------|-----|
 | 公開 | `https://jitan.app/`（直下は `index.html` が無いと 403/一覧なし。LP は `https://jitan.app/<site_key>/`） |
-| 管理画面 | `https://jitan.app/cms/admin/` |
+| 管理画面 | `https://jitan.app/cms/admin/`（LP Builder からは `?site_key=<フォルダ名>` 付きで開く。画面が自動で `select-site` する） |
 | API | `https://jitan.app/cms/api/` 配下（後述） |
 
 ---
@@ -19,8 +19,8 @@
 1. `POST /cms/api/login.php` — body: `{ "id", "password" }`  
    - 初期: ID `lp-admin`、サーバー固定の一時パス `Whatisthepassword?`（初回は変更必須の運用）
 2. 応答 `must_change_password: true` のとき、先に `POST /cms/api/change-password.php`（要 CSRF、12 文字以上の新パス）
-3. **LP 単位の切替**は `GET ?site_key=...` では**しない**  
-   - `POST /cms/api/select-site.php` — body: `{ "site_key": "連番ディレクトリ名" }`、ヘッダ `X-CSRF-Token: <me の csrf>`
+3. **LP 単位の切替**は常に `POST /cms/api/select-site.php`（`GET` だけでは切り替わらない）。URL の `?site_key=` は**初期選択のヒント**で、**画面が POST を送る**  
+   - body: `{ "site_key": "出力フォルダ名と同じ" }`、ヘッダ `X-CSRF-Token: <me の csrf>`
 4. 以降 `GET/PUT /cms/api/content.php` など。未選択のときは `400` + `site_not_selected`
 
 **CSRF:** `me.php` または login の応答の `csrf` を、書き込み系の `X-CSRF-Token` に付ける。

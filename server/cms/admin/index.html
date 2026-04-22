@@ -13,9 +13,9 @@
     <section class="card" id="loginCard">
       <h2>ログイン</h2>
       <p class="note">
-        <strong>LP を編集</strong>するときは「site_key」（アップロードしたフォルダ名）と
-        <code>custom/cms_credentials.json</code> と同じパスワード。<br>
-        site_key が空ならサーバー<strong>管理者</strong>（例: lp-admin）。
+        <strong>LP を編集（通常）</strong>: 「site_key」＝アップロードしたフォルダ名、パスワード＝ Builder が示す<strong>初期パスワード</strong>
+        （<code>custom/cms_credentials.json</code> と同じ）。初回は<strong>パスワード変更</strong>のあと編集できます。<br>
+        <strong>管理者のみ</strong>: site_key を空にして ID（例: lp-admin）でログイン。
       </p>
       <label>site_key（LPフォルダ名） <input id="siteKeyLogin" placeholder="空なら管理者ログイン" autocomplete="username"></label>
       <label>管理者ID <input id="loginId" placeholder="lp-admin" autocomplete="username"></label>

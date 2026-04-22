@@ -127,6 +127,7 @@ async function applyMeData(data) {
     switchBtn.style.display = data.auth === "site" ? "none" : "";
   }
   if (data.user?.must_change_password) {
+    stripSiteKeyQueryFromAddressBar();
     showOnly(passwordCard);
     return;
   }
@@ -224,6 +225,7 @@ document.getElementById("loginBtn").addEventListener("click", async () => {
       }
       csrf = data.csrf || "";
       if (data.must_change_password) {
+        stripSiteKeyQueryFromAddressBar();
         showOnly(passwordCard);
       } else {
         await fetchMeAndApply();
@@ -240,6 +242,7 @@ document.getElementById("loginBtn").addEventListener("click", async () => {
     }
     csrf = data.csrf || "";
     if (data.must_change_password) {
+      stripSiteKeyQueryFromAddressBar();
       showOnly(passwordCard);
     } else {
       await fetchMeAndApply();

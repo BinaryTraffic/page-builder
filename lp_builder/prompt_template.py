@@ -522,6 +522,7 @@ def build_system_prompt(
 - **禁止**: `images.pexels.com` の長い URL や、業種と無関係な固定 Unsplash ID を HTML にベタ書きすること（リンク切れ・他業種の写真のままになる）。`<img>` は **1×1 の透明 GIF** `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7` を `src` にしてよい（`pexels.js` が業種別に差し替える）
 - インタラクション: `<script src="script.js"></script>` を `</body>` 直前で読み込むのが確実（`<head>` に置いても DOM 構築後に初期化するよう実装済み）。ページ内リンクは下記の「**必須（ページ内アンカー）**」を遵守すること。右下の「↑ トップへ戻る」は script.js が自動付与（`style.css` の `.back-to-top` 前提）
 - **必須（ページ内アンカー）**: ナビ・フッター・本文で使う **`href="#xxx"` の `xxx` と、飛び先の `id="xxx"` を必ず同一文字列にする**（例: `<a href="#about">` → `<section id="about">` または `<div id="about">`）。**`#` だけ・空の href は不可**。`href` と `id` が1文字でも違うと script.js はスクロールできない。LP Builder は保存時に不整合があればログに警告する。
+- CTA へのリンクは **`href="#cta"` に統一**する。`#contact` / `#contact-form` / `#inquiry` など別名を使わない（保存時に `#cta` へ補正されるが、出力時点で統一すること）。
 
 ## 必須セクション構成
 1. Navbar（ロゴ・ナビリンク・CTAボタン）

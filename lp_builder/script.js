@@ -1,4 +1,24 @@
 function initLpScripts() {
+  function smoothScrollToY(targetY, durationMs) {
+    const startY = window.scrollY || window.pageYOffset || 0;
+    const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    const endY = Math.max(0, Math.min(maxY, targetY));
+    const delta = endY - startY;
+    if (Math.abs(delta) < 2) {
+      window.scrollTo(0, endY);
+      return;
+    }
+    const dur = Math.max(120, durationMs || 420);
+    const startTs = performance.now();
+    const ease = t => 1 - Math.pow(1 - t, 3);
+    function tick(ts) {
+      const p = Math.min(1, (ts - startTs) / dur);
+      window.scrollTo(0, startY + delta * ease(p));
+      if (p < 1) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+
   // Navbar scroll
   const navbar = document.getElementById('navbar');
   if (navbar) {
@@ -232,16 +252,29 @@ function initLpScripts() {
     window.addEventListener('scroll', onScroll, { passive: true });
     onScroll();
     btn.addEventListener('click', () => {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      smoothScrollToY(0, 360);
     });
   })();
 
   // ページ内アンカーリンクのスムーズスクロール
-  // CSS scroll-behavior は body の overflow-x:hidden により無効になるブラウザがあるため JS で補完
+  // href="#about" だけでなく "index.html#about" 形式も同一ページなら補足する
   document.addEventListener('click', function onAnchorClick(e) {
-    const a = e.target.closest('a[href^="#"]');
+    const a = e.target.closest('a[href]');
     if (!a) return;
-    const id = decodeURIComponent(a.getAttribute('href').slice(1));
+
+    let url;
+    try {
+      url = new URL(a.getAttribute('href'), window.location.href);
+    } catch {
+      return;
+    }
+    if (!url.hash || url.hash === '#') return;
+    if (url.origin !== window.location.origin) return;
+
+    const norm = p => (p || '/').replace(/\/+$/, '') || '/';
+    if (norm(url.pathname) !== norm(window.location.pathname)) return;
+
+    const id = decodeURIComponent(url.hash.slice(1));
     if (!id) return;
     const target = document.getElementById(id);
     if (!target) return;
@@ -249,7 +282,8 @@ function initLpScripts() {
     const navbar = document.getElementById('navbar');
     const offset = navbar ? navbar.offsetHeight + 8 : 80;
     const top = target.getBoundingClientRect().top + window.scrollY - offset;
-    window.scrollTo({ top, behavior: 'smooth' });
+    smoothScrollToY(top, 420);
+    if (history.pushState) history.pushState(null, '', '#' + encodeURIComponent(id));
   });
 }
 

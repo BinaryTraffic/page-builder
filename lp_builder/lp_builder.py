@@ -4,11 +4,15 @@ Python 3.x + tkinter（追加インストール不要）
 """
 
 import csv
+import base64
+import ctypes
 import functools
 import http.server
 import json
 import os
 import re
+import secrets
+import shutil
 import uuid
 import socketserver
 import subprocess
@@ -16,6 +20,7 @@ import sys
 import threading
 import urllib.parse
 import webbrowser
+import posixpath
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 from datetime import datetime
@@ -72,6 +77,8 @@ FONT_MONO = ("Consolas", 9)
 # 共有ファイル（アプリと同じフォルダに同梱）
 SHARED_FILES = ["script.js", "pexels.js"]
 APP_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+ENV_FILE = APP_DIR / ".env"
+WIN_TOKEN_FILE = Path(os.getenv("APPDATA") or str(Path.home())) / "LPBuilder" / "env_token.bin"
 
 # 概算コスト用デフォルト（USD / 100万トークン）。公式 Pricing と api_client の model 名に合わせて設定で調整してください。
 # https://platform.claude.com/docs/en/about-claude/pricing
@@ -175,6 +182,48 @@ def _ensure_navbar_class(html: str) -> str:
     return re.sub(r"<(?:nav|header)\b[^>]*>", _fix_tag, html, flags=re.I)
 
 
+def _normalize_common_anchor_aliases(html: str) -> str:
+    """
+    よくあるアンカー別名を実在セクションへ寄せる。
+    例: #contact / #contact-form があり、#cta が存在する場合は #cta に統一。
+    """
+    if not html:
+        return html
+    if not re.search(r'\bid\s*=\s*["\']cta["\']', html, re.I):
+        return html
+    out = html
+    for alias in ("contact", "contact-form", "inquiry", "reserve"):
+        out = re.sub(
+            rf'href\s*=\s*(["\'])#{re.escape(alias)}\1',
+            r'href="#cta"',
+            out,
+            flags=re.I,
+        )
+    return out
+
+
+def _ensure_custom_images_enabled(html: str) -> str:
+    """
+    pexels.js の custom/config.json 読み込みを有効化するため、
+    <html> 開始タグへ data-custom-images="1" を付与する。
+    """
+    if not html:
+        return html
+
+    def _fix(m: re.Match) -> str:
+        tag = m.group(0)
+        if re.search(r'\bdata-custom-images\s*=', tag, re.I):
+            return re.sub(
+                r'(\bdata-custom-images\s*=\s*)(["\']).*?\2',
+                r'\1"1"',
+                tag,
+                flags=re.I | re.S,
+            )
+        return tag[:-1] + ' data-custom-images="1">'
+
+    return re.sub(r"<html\b[^>]*>", _fix, html, count=1, flags=re.I)
+
+
 def _hash_anchor_mismatches(html: str) -> list[str]:
     """
     href=\"#...\" のページ内リンクに対し、対応する id または name が HTML 内にあるか検査する。
@@ -221,8 +270,24 @@ def _usage_meta_from_sheet(sheet: dict, out_dir: Path) -> dict:
     return {"label": lab, "output_dir": out_s}
 
 
+def _truncate_utf8_bytes(s: str, max_bytes: int) -> str:
+    """UTF-8 バイト数が max_bytes を超えないよう末尾から切り詰け（1 ファイル名の長さ対策）。"""
+    if not s or max_bytes <= 0:
+        return s
+    if len(s.encode("utf-8")) <= max_bytes:
+        return s
+    out = s
+    while out and len(out.encode("utf-8")) > max_bytes:
+        out = out[:-1]
+    return out or "lp"
+
+
 def safe_site_dir_segment(sheet: dict) -> str:
-    """出力サブフォルダ名用。店舗情報の先頭行などから派生。"""
+    """出力サブフォルダ名用。店舗情報の先頭行などから派生。
+
+    最終ディレクトリ名は ``{base}_{%Y%m%d_%H%M%S}_{lp_token}``。Linux ext4 等の
+    「1 コンポーネント 255 バイト」制限のため、base は先に短くする。
+    """
     shop = (sheet.get("shop_info") or "").strip()
     first_line = ""
     for line in shop.splitlines():
@@ -236,7 +301,13 @@ def safe_site_dir_segment(sheet: dict) -> str:
         raw = "lp_site"
     for c in '<>:"/\\|?*':
         raw = raw.replace(c, "_")
-    return raw.replace(" ", "_").lower()[:120]
+    raw = raw.replace(" ", "_").lower()
+    # _ + 日時(15) + _ + lp_token(24hex) = 41 バイト（ASCII）
+    _reserved = 1 + 15 + 1 + 24
+    raw = _truncate_utf8_bytes(raw, 255 - _reserved)
+    if not (raw and raw.replace("_", "").strip()):
+        raw = "lp_site"
+    return raw
 
 
 class _PreviewHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -259,6 +330,7 @@ class LPBuilderApp(tk.Tk):
 
         # 設定読み込み
         self.config_data = self._load_config()
+        self.env_data = self._load_env()
 
         # ウィジェット変数
         self.api_key_var = tk.StringVar(value=self.config_data.get("api_key", ""))
@@ -300,6 +372,7 @@ class LPBuilderApp(tk.Tk):
         self._last_auto_selling_text: str | None = None
 
         cd = self.config_data
+        env = self.env_data
 
         def _cfg_str(key: str, default: str) -> str:
             v = cd.get(key)
@@ -319,6 +392,26 @@ class LPBuilderApp(tk.Tk):
         )
         self.cost_est_in_var = tk.StringVar(value="")
         self.cost_est_out_var = tk.StringVar(value="")
+        self.sftp_host_var = tk.StringVar(value=str(env.get("SFTP_HOST") or cd.get("sftp_host", "")).strip())
+        self.sftp_port_var = tk.StringVar(value=str(env.get("SFTP_PORT") or cd.get("sftp_port", "22")).strip() or "22")
+        self.sftp_user_var = tk.StringVar(value=str(env.get("SFTP_USER") or cd.get("sftp_user", "")).strip())
+        self.sftp_pass_var = tk.StringVar(value=str(env.get("SFTP_PASS") or cd.get("sftp_pass", "")).strip())
+        self.sftp_remote_dir_var = tk.StringVar(value=str(env.get("SFTP_REMOTE_DIR") or cd.get("sftp_remote_dir", "")).strip())
+        self.sftp_route_url_var = tk.StringVar(
+            value=str(env.get("SFTP_ROUTE_URL") or cd.get("sftp_route_url", "https://www.jitan.app/")).strip() or "https://www.jitan.app/"
+        )
+        self.sftp_link_var = tk.StringVar(value="")
+        self._sftp_editing = False
+        self._sftp_edit_entries: list[tk.Entry] = []
+        self._sftp_pass_toggle_btn: tk.Button | None = None
+        self.sftp_edit_btn: tk.Button | None = None
+        self._last_generated_out_dir: str = ""
+        self._last_generated_sheet: dict | None = None
+        _route = self.sftp_route_url_var.get().strip().rstrip("/")
+        self.cms_editor_url_var = tk.StringVar(value=(f"{_route}/cms/admin/" if _route else ""))
+        self.cms_admin_user_var = tk.StringVar(value=str(env.get("CMS_ADMIN_USER") or cd.get("cms_admin_user", "lp-admin")).strip())
+        self.cms_admin_pass_var = tk.StringVar(value=str(env.get("CMS_ADMIN_TEMP_PASS") or cd.get("cms_admin_temp_pass", "<SET_NEW_PASSWORD_HERE>")).strip())
+        self.sftp_route_url_var.trace_add("write", lambda *_: self._refresh_cms_editor_url())
 
         self._build_ui()
         self._apply_style()
@@ -351,14 +444,20 @@ class LPBuilderApp(tk.Tk):
         self.nb = ttk.Notebook(self)
 
         self.tab_basic = self._make_tab("① 入力")
-        self.tab_settings = self._make_tab("⚙ 設定")
-        self.tab_cost = self._make_tab("💰 コスト・積算")
-        self.tab_log = self._make_tab("⑤ ログ")
+        self.tab_image = self._make_tab("② 画像")
+        self.tab_text = self._make_tab("③ 文章")
+        self.tab_sftp = self._make_tab("④ アップロード")
+        self.tab_cost = self._make_tab("⑤ コスト")
+        self.tab_log = self._make_tab("⑥ ログ")
+        self.tab_settings = self._make_tab("⑦ 設定")
 
         self._build_tab_basic()
-        self._build_tab_settings()
+        self._build_tab_image()
+        self._build_tab_text()
+        self._build_tab_sftp()
         self._build_tab_cost()
         self._build_tab_log()
+        self._build_tab_settings()
 
         # 下部：生成ボタン＋トークン概要（後で先に bottom を pack して常にウィンドウ下端に確保）
         self._build_bottom()
@@ -380,7 +479,11 @@ class LPBuilderApp(tk.Tk):
         sb = ttk.Scrollbar(f, orient="vertical", command=canvas.yview)
         inner = tk.Frame(canvas, bg=BG_INPUT)
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.bind(
+            "<Configure>",
+            lambda e: canvas.itemconfigure(inner_window, width=e.width),
+        )
         canvas.configure(yscrollcommand=sb.set)
         canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
@@ -393,29 +496,34 @@ class LPBuilderApp(tk.Tk):
 
         p = 16
         self._section_label(inner, "ターゲット・業種（AIに推定させません）")
-        row_t = tk.Frame(inner, bg=BG_INPUT)
-        row_t.pack(fill="x", padx=p, pady=4)
-        tk.Label(row_t, text="ターゲット層", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        row_tc = tk.Frame(inner, bg=BG_INPUT)
+        row_tc.pack(fill="x", padx=p, pady=4)
+        row_tc.grid_columnconfigure(0, weight=1, uniform="tc")
+        row_tc.grid_columnconfigure(1, weight=1, uniform="tc")
+
+        box_t = tk.Frame(row_tc, bg=BG_INPUT)
+        box_t.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        tk.Label(box_t, text="ターゲット層", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
         cb_tier = ttk.Combobox(
-            row_t,
+            box_t,
             textvariable=self.target_tier_var,
             values=list(TARGET_TIER_LABEL_TO_KEY.keys()),
             state="readonly",
-            width=28,
+            width=20,
         )
         cb_tier.pack(side="left", padx=4)
         cb_tier.bind("<<ComboboxSelected>>", self._on_target_tier_changed)
 
-        row_c = tk.Frame(inner, bg=BG_INPUT)
-        row_c.pack(fill="x", padx=p, pady=4)
-        tk.Label(row_c, text="業種カテゴリ", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        box_c = tk.Frame(row_tc, bg=BG_INPUT)
+        box_c.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        tk.Label(box_c, text="業種カテゴリ", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
         tk_key = normalize_target_tier(self.target_tier_var.get())
         self.cb_category = ttk.Combobox(
-            row_c,
+            box_c,
             textvariable=self.category_var,
             values=category_labels_for_tier(tk_key),
             state="readonly",
-            width=36,
+            width=24,
         )
         self.cb_category.pack(side="left", padx=4)
         self.cb_category.bind("<<ComboboxSelected>>", self._on_category_selected)
@@ -490,26 +598,31 @@ class LPBuilderApp(tk.Tk):
         self.selling_text.pack(fill="x", padx=p, pady=(4, 12))
 
         self._section_label(inner, "見た目（CSS）")
-        row2 = tk.Frame(inner, bg=BG_INPUT)
-        row2.pack(fill="x", padx=p, pady=4)
-        tk.Label(row2, text="カラー", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        row_vis = tk.Frame(inner, bg=BG_INPUT)
+        row_vis.pack(fill="x", padx=p, pady=4)
+        row_vis.grid_columnconfigure(0, weight=1, uniform="vis")
+        row_vis.grid_columnconfigure(1, weight=1, uniform="vis")
+
+        box_color = tk.Frame(row_vis, bg=BG_INPUT)
+        box_color.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        tk.Label(box_color, text="カラー", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
         ttk.Combobox(
-            row2,
+            box_color,
             textvariable=self.color_var,
             values=list(COLOR_PRESETS.keys()),
             state="readonly",
-            width=36,
+            width=24,
         ).pack(side="left", padx=4)
 
-        row_tpl = tk.Frame(inner, bg=BG_INPUT)
-        row_tpl.pack(fill="x", padx=p, pady=4)
-        tk.Label(row_tpl, text="LPテンプレート", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        box_tpl = tk.Frame(row_vis, bg=BG_INPUT)
+        box_tpl.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        tk.Label(box_tpl, text="LPテンプレート", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
         ttk.Combobox(
-            row_tpl,
+            box_tpl,
             textvariable=self.lp_template_var,
             values=[lab for lab, _ in LP_TEMPLATE_OPTIONS],
             state="readonly",
-            width=36,
+            width=24,
         ).pack(side="left", padx=4)
 
         self._apply_default_input_templates_if_applicable()
@@ -552,9 +665,126 @@ class LPBuilderApp(tk.Tk):
 
     def _toggle_custom_industry_row(self):
         if self.category_var.get() == CUSTOM_CATEGORY_LABEL:
-            self.custom_row.pack(fill="x", padx=16, pady=4)
+            self.custom_row.pack(fill="x", padx=16, pady=4, before=self.shop_text)
         else:
             self.custom_row.pack_forget()
+
+    def _build_tab_image(self):
+        f = self.tab_image
+        self._section_label(f, "画像編集（サーバーCMSへ移行）")
+        tk.Label(
+            f,
+            text=(
+                "ローカルアプリ内での画像編集機能は停止しました。\n"
+                "画像差し替え・文言編集は、アップロード先のCMS（ブラウザ）で実施してください。"
+            ),
+            bg=BG_INPUT,
+            fg=FG_SUB,
+            font=("Segoe UI", 10),
+            justify="left",
+        ).pack(anchor="w", padx=16, pady=(8, 10))
+
+        box = tk.Frame(f, bg=BG_INPUT)
+        box.pack(fill="x", padx=16, pady=4)
+        tk.Label(box, text="編集URL", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        tk.Entry(
+            box,
+            textvariable=self.cms_editor_url_var,
+            bg=BG_PANEL,
+            fg=GOLD,
+            readonlybackground=BG_PANEL,
+            disabledforeground=GOLD,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            state="readonly",
+            width=68,
+        ).pack(side="left", padx=4, fill="x", expand=True)
+
+        row = tk.Frame(f, bg=BG_INPUT)
+        row.pack(fill="x", padx=16, pady=4)
+        tk.Label(row, text="ログインID", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        tk.Entry(
+            row,
+            textvariable=self.cms_admin_user_var,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            readonlybackground=BG_PANEL,
+            disabledforeground=FG_MAIN,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            state="normal",
+            width=24,
+        ).pack(side="left", padx=4)
+        tk.Label(row, text="一時PW", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left", padx=(16, 0))
+        tk.Entry(
+            row,
+            textvariable=self.cms_admin_pass_var,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            readonlybackground=BG_PANEL,
+            disabledforeground=FG_MAIN,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            state="normal",
+            width=30,
+        ).pack(side="left", padx=4)
+
+        row_btn = tk.Frame(f, bg=BG_INPUT)
+        row_btn.pack(fill="x", padx=16, pady=(12, 4))
+        tk.Button(
+            row_btn,
+            text="CMS情報を保存",
+            command=self._save_config,
+            bg=GOLD_DARK,
+            fg=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            cursor="hand2",
+            padx=12,
+            pady=6,
+        ).pack(side="left", padx=(0, 8))
+        tk.Button(
+            row_btn,
+            text="CMS編集画面を開く",
+            command=self._open_cms_editor_url,
+            bg=BG_PANEL,
+            fg=GOLD,
+            relief="flat",
+            font=FONT_BODY,
+            cursor="hand2",
+            padx=12,
+            pady=6,
+        ).pack(side="left")
+
+    def _open_cms_editor_url(self) -> None:
+        url = (self.cms_editor_url_var.get() or "").strip()
+        if not url:
+            messagebox.showerror("未設定", "編集URLが未設定です。④ アップロードで ROUTEURL を設定してください。")
+            return
+        webbrowser.open(url)
+
+    def _build_tab_text(self):
+        f = self.tab_text
+        self._section_label(f, "文章")
+        tk.Label(
+            f,
+            text="文章テンプレート・口調・禁止語の設定機能はこのタブに追加予定です。",
+            bg=BG_INPUT,
+            fg=FG_SUB,
+            font=("Segoe UI", 10),
+            justify="left",
+        ).pack(anchor="w", padx=16, pady=(8, 6))
+        tk.Label(
+            f,
+            text="現状は「① 入力」タブの本文メモ欄を利用してください。",
+            bg=BG_INPUT,
+            fg=FG_SUB,
+            font=("Segoe UI", 9),
+            justify="left",
+        ).pack(anchor="w", padx=16, pady=(0, 12))
 
     # ─── タブ②：設定 ─────────────────────────
     def _build_tab_settings(self):
@@ -617,6 +847,199 @@ class LPBuilderApp(tk.Tk):
         tk.Button(f, text="  設定を保存  ", command=self._save_config,
                   bg=GOLD, fg=BG_DARK, relief="flat", font=FONT_H2,
                   cursor="hand2", padx=12, pady=6).pack(pady=20)
+
+    # ─── タブ：SFTP ───────────────────────────
+    def _build_tab_sftp(self):
+        f = self.tab_sftp
+        self._section_label(f, "アップロード設定")
+        tk.Label(
+            f,
+            text="公開用サーバーへの接続情報とアップロード先を設定します。",
+            bg=BG_INPUT,
+            fg=FG_SUB,
+            font=("Segoe UI", 9),
+            wraplength=820,
+            justify="left",
+        ).pack(anchor="w", padx=16, pady=(4, 8))
+
+        row1 = tk.Frame(f, bg=BG_INPUT)
+        row1.pack(fill="x", padx=16, pady=4)
+        tk.Label(row1, text="ホスト", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        ent_host = tk.Entry(
+            row1,
+            textvariable=self.sftp_host_var,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            readonlybackground=BG_PANEL,
+            disabledforeground=FG_MAIN,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            width=34,
+        )
+        ent_host.pack(side="left", padx=4)
+        tk.Label(row1, text="ポート", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left", padx=(16, 0))
+        ent_port = tk.Entry(
+            row1,
+            textvariable=self.sftp_port_var,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            readonlybackground=BG_PANEL,
+            disabledforeground=FG_MAIN,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            width=8,
+        )
+        ent_port.pack(side="left", padx=4)
+        self.sftp_edit_btn = tk.Button(
+            row1,
+            text="接続編集",
+            command=self._toggle_sftp_edit_mode,
+            bg=GOLD_DARK,
+            fg=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            cursor="hand2",
+            padx=12,
+            pady=6,
+        )
+        self.sftp_edit_btn.pack(side="right", padx=(8, 0))
+        tk.Button(
+            row1,
+            text="SFTP接続テスト",
+            command=self._test_sftp_connection,
+            bg=BG_PANEL,
+            fg=GOLD,
+            relief="flat",
+            font=FONT_BODY,
+            cursor="hand2",
+            padx=12,
+            pady=6,
+        ).pack(side="right", padx=(0, 8))
+
+        row2 = tk.Frame(f, bg=BG_INPUT)
+        row2.pack(fill="x", padx=16, pady=4)
+        tk.Label(row2, text="ユーザー名", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        ent_user = tk.Entry(
+            row2,
+            textvariable=self.sftp_user_var,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            readonlybackground=BG_PANEL,
+            disabledforeground=FG_MAIN,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            width=24,
+        )
+        ent_user.pack(side="left", padx=4)
+        tk.Label(row2, text="パスワード", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left", padx=(16, 0))
+        ent_pass = tk.Entry(
+            row2,
+            textvariable=self.sftp_pass_var,
+            show="•",
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            readonlybackground=BG_PANEL,
+            disabledforeground=FG_MAIN,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            width=24,
+        )
+        ent_pass.pack(side="left", padx=4)
+        self._sftp_pass_toggle_btn = tk.Button(
+            row2,
+            text="表示/非表示",
+            command=lambda: ent_pass.config(show="" if ent_pass.cget("show") else "•"),
+            bg=BG_PANEL,
+            fg=FG_SUB,
+            relief="flat",
+            font=FONT_BODY,
+            cursor="hand2",
+        )
+        self._sftp_pass_toggle_btn.pack(side="left", padx=4)
+
+        row3 = tk.Frame(f, bg=BG_INPUT)
+        row3.pack(fill="x", padx=16, pady=4)
+        tk.Label(row3, text="リモートパス", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        ent_remote = tk.Entry(
+            row3,
+            textvariable=self.sftp_remote_dir_var,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            readonlybackground=BG_PANEL,
+            disabledforeground=FG_MAIN,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            width=58,
+        )
+        ent_remote.pack(side="left", padx=4, fill="x", expand=True)
+
+        row4 = tk.Frame(f, bg=BG_INPUT)
+        row4.pack(fill="x", padx=16, pady=4)
+        tk.Label(row4, text="ドメインROUTEURL", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        ent_route = tk.Entry(
+            row4,
+            textvariable=self.sftp_route_url_var,
+            bg=BG_PANEL,
+            fg=FG_MAIN,
+            readonlybackground=BG_PANEL,
+            disabledforeground=FG_MAIN,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            width=58,
+        )
+        ent_route.pack(side="left", padx=4, fill="x", expand=True)
+
+        tk.Label(
+            f,
+            text="例: /var/www/html/lp_site",
+            bg=BG_INPUT,
+            fg=FG_SUB,
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", padx=16, pady=(4, 16))
+
+        row_btn = tk.Frame(f, bg=BG_INPUT)
+        row_btn.pack(fill="x", padx=16, pady=(0, 8))
+
+        row_link = tk.Frame(f, bg=BG_INPUT)
+        row_link.pack(fill="x", padx=16, pady=(0, 16))
+        tk.Label(row_link, text="公開URL", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        tk.Entry(
+            row_link,
+            textvariable=self.sftp_link_var,
+            bg=BG_PANEL,
+            fg=GOLD,
+            readonlybackground=BG_PANEL,
+            disabledforeground=GOLD,
+            insertbackground=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            width=58,
+            state="readonly",
+        ).pack(side="left", padx=4, fill="x", expand=True)
+
+        row_upload = tk.Frame(f, bg=BG_INPUT)
+        row_upload.pack(fill="x", padx=16, pady=(4, 8))
+        tk.Button(
+            row_upload,
+            text="アップロード",
+            command=self._upload_latest_via_sftp,
+            bg=GOLD_DARK,
+            fg=FG_MAIN,
+            relief="flat",
+            font=FONT_BODY,
+            cursor="hand2",
+            padx=16,
+            pady=8,
+        ).pack(side="right")
+
+        self._sftp_edit_entries = [ent_host, ent_port, ent_user, ent_pass, ent_remote, ent_route]
+        self._set_sftp_editable(False)
 
     # ─── タブ：コスト・積算 ────────────────────
     def _build_tab_cost(self):
@@ -835,7 +1258,7 @@ class LPBuilderApp(tk.Tk):
             relief="flat", font=("Segoe UI", 13, "bold"),
             cursor="hand2", padx=16, pady=10,
         )
-        self.gen_btn.pack(side="left")
+        self.gen_btn.pack(side="right", padx=(0, 8))
 
         self.save_sheet_btn = tk.Button(
             btn_frame,
@@ -845,32 +1268,35 @@ class LPBuilderApp(tk.Tk):
             relief="flat", font=FONT_BODY,
             cursor="hand2", padx=12, pady=10,
         )
-        self.save_sheet_btn.pack(side="left", padx=8)
+        self.save_sheet_btn.pack(side="right", padx=(0, 8))
 
-        self.status_label = tk.Label(
-            btn_frame, text="待機中", bg=BG_DARK, fg=FG_SUB, font=FONT_BODY
-        )
-        self.status_label.pack(side="right", padx=8)
+        self.status_label = tk.Label(btn_frame, text="待機中", bg=BG_DARK, fg=FG_SUB, font=FONT_BODY)
+        self.status_label.pack(side="left", padx=4)
 
-        usage_frame = tk.Frame(self.bottom_bar, bg=BG_DARK)
-        usage_frame.pack(fill="x", pady=(8, 0))
-        tk.Label(
-            usage_frame,
-            text="APIトークン・概算コスト",
-            bg=BG_DARK,
-            fg=GOLD,
-            font=("Segoe UI", 9, "bold"),
-        ).pack(anchor="w")
-        self.usage_label = tk.Label(
-            usage_frame,
-            text="",
+        status_frame = tk.Frame(self.bottom_bar, bg=BG_DARK)
+        status_frame.pack(fill="x", pady=(8, 0))
+        self.info_label = tk.Label(
+            status_frame,
+            text="Info: ローカルプレビューURLをここに表示します。",
             bg=BG_DARK,
             fg=FG_SUB,
-            font=FONT_MONO,
-            justify="left",
+            font=FONT_BODY,
             anchor="w",
+            justify="left",
         )
-        self.usage_label.pack(fill="x", pady=(2, 0))
+        self.info_label.pack(side="left", fill="x", expand=True)
+        self.preview_url_label = tk.Label(
+            status_frame,
+            text="",
+            bg=BG_DARK,
+            fg=GOLD,
+            font=FONT_BODY,
+            cursor="hand2",
+            anchor="e",
+            justify="right",
+        )
+        self.preview_url_label.pack(side="right")
+        self.preview_url_label.bind("<Button-1>", lambda _e: self._open_preview_url_from_status())
 
     # ─── API利用明細 JSON ─────────────────────
     def _usage_ledger_path(self) -> Path:
@@ -1287,17 +1713,18 @@ class LPBuilderApp(tk.Tk):
         else:
             last_usd = None
             sess_usd = None
-        self.usage_label.config(
-            text=self._usage_display_text(
-                self._last_in,
-                self._last_out,
-                self._session_input_tokens,
-                self._session_output_tokens,
-                last_usd,
-                sess_usd,
-                jpy,
+        if getattr(self, "usage_label", None):
+            self.usage_label.config(
+                text=self._usage_display_text(
+                    self._last_in,
+                    self._last_out,
+                    self._session_input_tokens,
+                    self._session_output_tokens,
+                    last_usd,
+                    sess_usd,
+                    jpy,
+                )
             )
-        )
         self._refresh_cost_tab()
 
     def _apply_usage_stats(self, result: dict, meta: dict | None = None) -> None:
@@ -1499,7 +1926,7 @@ class LPBuilderApp(tk.Tk):
         api_key = self.api_key_var.get().strip()
         if not api_key:
             messagebox.showerror("エラー", "APIキーを設定タブに入力してください。")
-            self.nb.select(1)
+            self.nb.select(self.tab_settings)
             return
 
         shop = self.shop_text.get("1.0", "end").strip()
@@ -1508,7 +1935,7 @@ class LPBuilderApp(tk.Tk):
                 "エラー",
                 "① 入力タブの「店舗情報・本文メモ」に、少なくとも店名や基本情報を入力してください。",
             )
-            self.nb.select(0)
+            self.nb.select(self.tab_basic)
             return
 
         if self.category_var.get() == CUSTOM_CATEGORY_LABEL:
@@ -1517,13 +1944,14 @@ class LPBuilderApp(tk.Tk):
                     "エラー",
                     "業種カテゴリが「その他」のときは、「業種（自由入力）」を入力してください。",
                 )
-                self.nb.select(0)
+                self.nb.select(self.tab_basic)
                 return
 
         self.is_generating = True
         self.gen_btn.config(state="disabled", text="  生成中...  ", bg=BG_PANEL, fg=FG_SUB)
         self._open_generate_modal()
         sheet = self._collect_sheet()
+        self._last_generated_sheet = dict(sheet)
         threading.Thread(target=self._generate_thread, args=(sheet, api_key), daemon=True).start()
 
     def _generate_thread(self, sheet: dict, api_key: str):
@@ -1532,6 +1960,8 @@ class LPBuilderApp(tk.Tk):
         # 出力ディレクトリ作成（出力先に「例:」が混入していても正規化）
         site_name = safe_site_dir_segment(sheet)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # 各LPの一意性（URLパス・サーバー登録用）。ディレクトリ名のサフィックスに使う
+        lp_token = secrets.token_hex(12)  # 24 hex
         try:
             root = normalize_output_dir(self.output_dir.get())
             root.mkdir(parents=True, exist_ok=True)
@@ -1539,7 +1969,7 @@ class LPBuilderApp(tk.Tk):
             self._log(f"出力先フォルダを作成できません: {e}", RED_ERR)
             self.after(0, self._on_generate_done, False, "")
             return
-        out_dir = root / f"{site_name}_{ts}"
+        out_dir = root / f"{site_name}_{ts}_{lp_token}"
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -1547,6 +1977,7 @@ class LPBuilderApp(tk.Tk):
             self.after(0, self._on_generate_done, False, str(root))
             return
         self._log(f"出力先: {out_dir}")
+        self._log(f"lp_token: {lp_token}（public URL / サーバー識別子）")
 
         # INPUT_SHEET.md 保存
         md_path = out_dir / "INPUT_SHEET.md"
@@ -1568,6 +1999,8 @@ class LPBuilderApp(tk.Tk):
         cache_ver = ts.replace("_", "")
         raw_html = _strip_navbar_inline_styles(result["html"])
         raw_html = _ensure_navbar_class(raw_html)
+        raw_html = _normalize_common_anchor_aliases(raw_html)
+        raw_html = _ensure_custom_images_enabled(raw_html)
         html_final = _inject_asset_cache_bust(raw_html, cache_ver)
         html_path.write_text(html_final, encoding="utf-8")
         self._log(
@@ -1577,13 +2010,13 @@ class LPBuilderApp(tk.Tk):
             self._log(f"アンカー確認: {w}", WARN_MSG)
 
         # 共有ファイルをコピー（選択テーマの style.css を style.css 名で配置）
-        self._copy_shared_files(out_dir, sheet)
+        self._copy_shared_files(out_dir, sheet, lp_token=lp_token)
 
         self._log("完了！localhost でプレビューを開きます...")
         self.after(0, self._on_generate_done, True, str(out_dir))
 
-    def _copy_shared_files(self, out_dir: Path, sheet: dict):
-        """選択テーマの CSS を style.css としてコピーし、script.js / pexels.js を同梱"""
+    def _copy_shared_files(self, out_dir: Path, sheet: dict, *, lp_token: str = ""):
+        """選択テーマの CSS を style.css としてコピーし、script.js / pexels.js を同梱。custom/lp_meta.json でサーバーへトークンを引き渡す。"""
         import shutil
 
         tpl = normalize_lp_template_key(sheet.get("lp_template"))
@@ -1604,6 +2037,18 @@ class LPBuilderApp(tk.Tk):
 
         custom_dir = out_dir / "custom"
         custom_dir.mkdir(exist_ok=True)
+        if lp_token:
+            site_key = out_dir.name
+            meta = {
+                "lp_token": lp_token,
+                "site_key": site_key,
+                "generated_at": datetime.now().astimezone().replace(microsecond=0).isoformat(),
+            }
+            (custom_dir / "lp_meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            self._log("custom/lp_meta.json を保存（サーバー側でサイト識別用）")
         ex = APP_DIR / "custom_config.example.json"
         if ex.exists():
             shutil.copy2(ex, custom_dir / "config.example.json")
@@ -1651,12 +2096,27 @@ class LPBuilderApp(tk.Tk):
             url = f"http://127.0.0.1:{port}/index.html"
             webbrowser.open(url)
             self._log(f"ローカルプレビュー: {url}")
+            if getattr(self, "preview_url_label", None):
+                self.preview_url_label.config(text=url)
+            if getattr(self, "info_label", None):
+                self.info_label.config(text="Status: 生成完了 / クリックでプレビューを開く")
             return url
         except Exception as e:
             self._log(f"ローカルサーバー起動に失敗: {e} — file:// で開きます", RED_ERR)
             fu = index_path.as_uri()
             webbrowser.open(fu)
+            if getattr(self, "preview_url_label", None):
+                self.preview_url_label.config(text=fu)
+            if getattr(self, "info_label", None):
+                self.info_label.config(text="Status: file:// でプレビューを開きました")
             return fu
+
+    def _open_preview_url_from_status(self) -> None:
+        t = ""
+        if getattr(self, "preview_url_label", None):
+            t = (self.preview_url_label.cget("text") or "").strip()
+        if t:
+            webbrowser.open(t)
 
     def _on_close(self) -> None:
         self._stop_preview_server()
@@ -1673,6 +2133,7 @@ class LPBuilderApp(tk.Tk):
         self._close_generate_modal()
         self.gen_btn.config(state="normal", text="  ▶  LP を生成する  ", bg=GOLD, fg=BG_DARK)
         if success:
+            self._last_generated_out_dir = out_dir
             preview_url = self._open_local_preview(out_dir)
             msg_extra = (
                 f"\nプレビュー:\n{preview_url}\n"
@@ -1713,6 +2174,14 @@ class LPBuilderApp(tk.Tk):
             "price_input_per_mtok":  self.price_in_var.get().strip(),
             "price_output_per_mtok": self.price_out_var.get().strip(),
             "jpy_per_usd":           self.jpy_per_usd_var.get().strip(),
+            "sftp_host": self.sftp_host_var.get().strip(),
+            "sftp_port": self.sftp_port_var.get().strip(),
+            "sftp_user": self.sftp_user_var.get().strip(),
+            "sftp_pass": self.sftp_pass_var.get().strip(),
+            "sftp_remote_dir": self.sftp_remote_dir_var.get().strip(),
+            "sftp_route_url": self.sftp_route_url_var.get().strip(),
+            "cms_admin_user": self.cms_admin_user_var.get().strip(),
+            "cms_admin_temp_pass": self.cms_admin_pass_var.get().strip(),
             "lp_template": normalize_lp_template_key(
                 LP_TEMPLATE_LABEL_TO_KEY.get(self.lp_template_var.get())
             ),
@@ -1721,9 +2190,368 @@ class LPBuilderApp(tk.Tk):
             "custom_industry": self.custom_industry_var.get().strip(),
         }
         CONFIG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._save_sftp_env(silent=True)
         self._log("設定を保存しました")
         self._refresh_usage_display()
         messagebox.showinfo("保存完了", "設定を保存しました。")
+
+    def _parse_env_text(self, text: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip()
+            if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
+                v = v[1:-1]
+            out[k] = v
+        return out
+
+    def _ensure_windows_token(self) -> bytes:
+        try:
+            if WIN_TOKEN_FILE.is_file():
+                b = WIN_TOKEN_FILE.read_bytes()
+                if len(b) >= 16:
+                    return b
+        except Exception:
+            pass
+        WIN_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        b = os.urandom(32)
+        WIN_TOKEN_FILE.write_bytes(b)
+        return b
+
+    def _dpapi_encrypt(self, plain_text: str) -> str:
+        if os.name != "nt":
+            return plain_text
+        blob = plain_text.encode("utf-8")
+        entropy = self._ensure_windows_token()
+
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+        in_buf = (ctypes.c_ubyte * len(blob)).from_buffer_copy(blob)
+        ent_buf = (ctypes.c_ubyte * len(entropy)).from_buffer_copy(entropy)
+        in_blob = DATA_BLOB(len(blob), ctypes.cast(in_buf, ctypes.POINTER(ctypes.c_ubyte)))
+        ent_blob = DATA_BLOB(len(entropy), ctypes.cast(ent_buf, ctypes.POINTER(ctypes.c_ubyte)))
+        out_blob = DATA_BLOB()
+
+        flags = 0x01  # CRYPTPROTECT_UI_FORBIDDEN
+        ok = ctypes.windll.crypt32.CryptProtectData(
+            ctypes.byref(in_blob),
+            None,
+            ctypes.byref(ent_blob),
+            None,
+            None,
+            flags,
+            ctypes.byref(out_blob),
+        )
+        if not ok:
+            raise OSError("CryptProtectData failed")
+        try:
+            out_bytes = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+        finally:
+            ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+        return "LPB_ENC_V1:" + base64.b64encode(out_bytes).decode("ascii")
+
+    def _dpapi_decrypt(self, text: str) -> str:
+        if os.name != "nt":
+            return text
+        if not text.startswith("LPB_ENC_V1:"):
+            return text
+        enc = text[len("LPB_ENC_V1:") :].strip()
+        cipher = base64.b64decode(enc)
+        entropy = self._ensure_windows_token()
+
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+        in_buf = (ctypes.c_ubyte * len(cipher)).from_buffer_copy(cipher)
+        ent_buf = (ctypes.c_ubyte * len(entropy)).from_buffer_copy(entropy)
+        in_blob = DATA_BLOB(len(cipher), ctypes.cast(in_buf, ctypes.POINTER(ctypes.c_ubyte)))
+        ent_blob = DATA_BLOB(len(entropy), ctypes.cast(ent_buf, ctypes.POINTER(ctypes.c_ubyte)))
+        out_blob = DATA_BLOB()
+
+        flags = 0x01  # CRYPTPROTECT_UI_FORBIDDEN
+        ok = ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(in_blob),
+            None,
+            ctypes.byref(ent_blob),
+            None,
+            None,
+            flags,
+            ctypes.byref(out_blob),
+        )
+        if not ok:
+            raise OSError("CryptUnprotectData failed")
+        try:
+            out_bytes = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+        finally:
+            ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+        return out_bytes.decode("utf-8")
+
+    def _load_env(self) -> dict:
+        if not ENV_FILE.is_file():
+            return {}
+        try:
+            text = ENV_FILE.read_text(encoding="utf-8")
+        except Exception:
+            return {}
+        if text.startswith("LPB_ENC_V1:"):
+            try:
+                dec = self._dpapi_decrypt(text)
+                return self._parse_env_text(dec)
+            except Exception:
+                return {}
+        return self._parse_env_text(text)
+
+    def _save_sftp_env(self, silent: bool = False) -> None:
+        data = self._load_env()
+        data["SFTP_HOST"] = self.sftp_host_var.get().strip()
+        data["SFTP_PORT"] = self.sftp_port_var.get().strip() or "22"
+        data["SFTP_USER"] = self.sftp_user_var.get().strip()
+        data["SFTP_PASS"] = self.sftp_pass_var.get().strip()
+        data["SFTP_REMOTE_DIR"] = self.sftp_remote_dir_var.get().strip()
+        data["SFTP_ROUTE_URL"] = self.sftp_route_url_var.get().strip() or "https://www.jitan.app/"
+        data["CMS_ADMIN_USER"] = self.cms_admin_user_var.get().strip() or "lp-admin"
+        data["CMS_ADMIN_TEMP_PASS"] = self.cms_admin_pass_var.get().strip() or "<SET_NEW_PASSWORD_HERE>"
+        lines = [f'{k}="{str(v).replace(chr(34), "\\\"")}"' for k, v in sorted(data.items())]
+        plain = "\n".join(lines) + "\n"
+        if os.name == "nt":
+            ENV_FILE.write_text(self._dpapi_encrypt(plain), encoding="utf-8")
+        else:
+            ENV_FILE.write_text(plain, encoding="utf-8")
+        self.env_data = dict(data)
+        self._refresh_cms_editor_url()
+        if os.name == "nt":
+            self._log(f".env を暗号化して保存しました: {ENV_FILE}")
+        else:
+            self._log(f".env を保存しました: {ENV_FILE}")
+        if not silent:
+            messagebox.showinfo("保存完了", f"SFTP設定を .env に保存しました。\n{ENV_FILE}")
+
+    def _refresh_cms_editor_url(self) -> None:
+        route = (self.sftp_route_url_var.get() or "").strip().rstrip("/")
+        self.cms_editor_url_var.set(f"{route}/cms/admin/" if route else "")
+
+    def _test_sftp_connection(self) -> None:
+        host = self.sftp_host_var.get().strip()
+        user = self.sftp_user_var.get().strip()
+        pwd = self.sftp_pass_var.get()
+        port_s = self.sftp_port_var.get().strip() or "22"
+        try:
+            port = int(port_s)
+        except ValueError:
+            messagebox.showerror("入力エラー", "SFTPポートは整数で入力してください。")
+            return
+        if not host or not user:
+            messagebox.showerror("入力エラー", "SFTPホストとユーザー名は必須です。")
+            return
+        self._save_sftp_env(silent=True)
+        self._log(f"SFTP接続テスト開始: {user}@{host}:{port}")
+        try:
+            import paramiko  # type: ignore
+        except Exception:
+            messagebox.showerror(
+                "依存不足",
+                "paramiko が見つかりません。`pip install -r requirements.txt` を実行してください。",
+            )
+            return
+        try:
+            tr = paramiko.Transport((host, port))
+            tr.banner_timeout = 8
+            tr.connect(username=user, password=pwd)
+            tr.close()
+            self._log("SFTP接続テスト: 成功", GREEN_OK)
+            messagebox.showinfo("接続テスト", "SFTP接続に成功しました。")
+        except Exception as e:
+            self._log(f"SFTP接続テスト: 失敗 ({e})", RED_ERR)
+            messagebox.showerror("接続テスト失敗", f"SFTP接続に失敗しました。\n\n{e}")
+
+    def _set_sftp_editable(self, editable: bool) -> None:
+        state = "normal" if editable else "readonly"
+        for ent in self._sftp_edit_entries:
+            try:
+                ent.config(state=state)
+            except tk.TclError:
+                pass
+        if self._sftp_pass_toggle_btn is not None:
+            try:
+                self._sftp_pass_toggle_btn.config(state="normal" if editable else "disabled")
+            except tk.TclError:
+                pass
+
+    def _toggle_sftp_edit_mode(self) -> None:
+        if not self._sftp_editing:
+            ok = messagebox.askyesno(
+                "接続情報を編集",
+                "SFTP接続情報を編集しますか？\n\n「はい」で編集モードに切り替えます。",
+            )
+            if not ok:
+                return
+            self._sftp_editing = True
+            self._set_sftp_editable(True)
+            if self.sftp_edit_btn is not None:
+                self.sftp_edit_btn.config(text="保存", bg=GOLD, fg=BG_DARK)
+            self._log("SFTP接続情報: 編集モードに切り替えました")
+            return
+
+        self._sftp_editing = False
+        self._set_sftp_editable(False)
+        if self.sftp_edit_btn is not None:
+            self.sftp_edit_btn.config(text="接続編集", bg=GOLD_DARK, fg=FG_MAIN)
+        self._log("SFTP接続情報の編集を終了しました", GREEN_OK)
+        messagebox.showinfo("保存完了", "接続設定を反映しました（.env への書き出しは未実行）。")
+
+    @staticmethod
+    def _read_lp_meta(out_dir: Path) -> dict:
+        p = out_dir / "custom" / "lp_meta.json"
+        if not p.is_file():
+            return {}
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _make_site_info_pdf(self, out_dir: Path, site_key: str, *, lp_token: str = "") -> Path:
+        """
+        簡易 PDF（ASCII中心）を生成。サイト情報とリンクを記録してアップロード対象にする。
+        site_key はリモートURLパスに使うディレクトリ名（out_dir.name と同じ）。
+        """
+        info_path = out_dir / "SITE_INFO.pdf"
+        route = self.sftp_route_url_var.get().strip().rstrip("/")
+        link = f"{route}/{site_key}/index.html" if route else f"/{site_key}/index.html"
+        lines = [
+            "LP Builder Upload Report",
+            f"site_key: {site_key}",
+            f"lp_token: {lp_token or '(not in lp_meta.json)'}",
+            f"Generated At: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Local Path: {out_dir}",
+            f"Public URL: {link}",
+            f"Target Host: {self.sftp_host_var.get().strip()}:{self.sftp_port_var.get().strip() or '22'}",
+            f"Remote Path: {self.sftp_remote_dir_var.get().strip()}",
+        ]
+
+        def esc(s: str) -> str:
+            return s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+        content_lines = ["BT", "/F1 11 Tf", "50 790 Td", "14 TL"]
+        for ln in lines:
+            safe = esc(ln.encode("latin-1", "replace").decode("latin-1"))
+            content_lines.append(f"({safe}) Tj")
+            content_lines.append("T*")
+        content_lines.append("ET")
+        stream = ("\n".join(content_lines) + "\n").encode("latin-1")
+
+        objs: list[bytes] = []
+        objs.append(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n")
+        objs.append(b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n")
+        objs.append(
+            b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n"
+        )
+        objs.append(b"4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n")
+        objs.append(
+            b"5 0 obj << /Length " + str(len(stream)).encode("ascii") + b" >> stream\n" + stream + b"endstream\nendobj\n"
+        )
+
+        out = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"
+        offsets = [0]
+        for o in objs:
+            offsets.append(len(out))
+            out += o
+        xref_pos = len(out)
+        out += f"xref\n0 {len(objs)+1}\n".encode("ascii")
+        out += b"0000000000 65535 f \n"
+        for off in offsets[1:]:
+            out += f"{off:010d} 00000 n \n".encode("ascii")
+        out += (
+            b"trailer << /Size "
+            + str(len(objs)+1).encode("ascii")
+            + b" /Root 1 0 R >>\nstartxref\n"
+            + str(xref_pos).encode("ascii")
+            + b"\n%%EOF\n"
+        )
+        info_path.write_bytes(out)
+        return info_path
+
+    def _sftp_mkdir_p(self, sftp, remote_dir: str) -> None:
+        cur = "/"
+        for part in [p for p in remote_dir.split("/") if p]:
+            cur = posixpath.join(cur, part)
+            try:
+                sftp.stat(cur)
+            except Exception:
+                sftp.mkdir(cur)
+
+    def _sftp_upload_dir(self, sftp, local_dir: Path, remote_dir: str) -> None:
+        self._sftp_mkdir_p(sftp, remote_dir)
+        for root, dirs, files in os.walk(local_dir):
+            rel = Path(root).relative_to(local_dir)
+            remote_root = remote_dir if str(rel) == "." else posixpath.join(remote_dir, str(rel).replace("\\", "/"))
+            self._sftp_mkdir_p(sftp, remote_root)
+            for d in dirs:
+                self._sftp_mkdir_p(sftp, posixpath.join(remote_root, d))
+            for fn in files:
+                lp = Path(root) / fn
+                rp = posixpath.join(remote_root, fn)
+                sftp.put(str(lp), rp)
+
+    def _upload_latest_via_sftp(self) -> None:
+        out_dir_s = (self._last_generated_out_dir or "").strip()
+        if not out_dir_s or not Path(out_dir_s).is_dir():
+            messagebox.showerror("アップロード不可", "先にLPを生成してください（保存先が見つかりません）。")
+            return
+        host = self.sftp_host_var.get().strip()
+        user = self.sftp_user_var.get().strip()
+        pwd = self.sftp_pass_var.get()
+        remote_base = self.sftp_remote_dir_var.get().strip()
+        route = self.sftp_route_url_var.get().strip().rstrip("/")
+        if not host or not user or not remote_base:
+            messagebox.showerror("入力エラー", "SFTPホスト・ユーザー名・リモートパスは必須です。")
+            return
+        try:
+            port = int((self.sftp_port_var.get().strip() or "22"))
+        except ValueError:
+            messagebox.showerror("入力エラー", "SFTPポートは整数で入力してください。")
+            return
+        try:
+            import paramiko  # type: ignore
+        except Exception:
+            messagebox.showerror("依存不足", "paramiko が見つかりません。`pip install -r requirements.txt` を実行してください。")
+            return
+
+        out_dir = Path(out_dir_s)
+        site_key = out_dir.name
+        meta = self._read_lp_meta(out_dir)
+        lp_tok = (meta.get("lp_token") or "").strip() if isinstance(meta, dict) else ""
+        remote_release_dir = posixpath.join(remote_base.rstrip("/"), site_key)
+        pdf_path = self._make_site_info_pdf(out_dir, site_key, lp_token=lp_tok)
+        self._save_sftp_env(silent=True)
+        self._log(
+            f"SFTPアップロード開始: {remote_release_dir}（site_key={site_key}, lp_token={lp_tok or '—'}）"
+        )
+        try:
+            cli = paramiko.SSHClient()
+            cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            cli.connect(hostname=host, port=port, username=user, password=pwd, timeout=10)
+            sftp = cli.open_sftp()
+            self._sftp_upload_dir(sftp, out_dir, remote_release_dir)
+            sftp.put(str(pdf_path), posixpath.join(remote_release_dir, pdf_path.name))
+            sftp.close()
+            cli.close()
+            public_url = f"{route}/{site_key}/index.html" if route else f"/{site_key}/index.html"
+            self.sftp_link_var.set(public_url)
+            self._log(f"SFTPアップロード完了: {public_url}", GREEN_OK)
+            messagebox.showinfo("アップロード完了", f"アップロードが完了しました。\n\n{public_url}")
+            try:
+                self.nb.select(self.tab_sftp)
+            except tk.TclError:
+                pass
+        except Exception as e:
+            self._log(f"SFTPアップロード失敗: {e}", RED_ERR)
+            messagebox.showerror("アップロード失敗", f"SFTPアップロードに失敗しました。\n\n{e}")
 
     def _load_config(self) -> dict:
         if CONFIG_FILE.exists():

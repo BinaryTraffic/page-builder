@@ -54,13 +54,18 @@ python lp_builder.py
 
 ```
 出力先フォルダ/
-└── サイト名_20260414_123456/
+└── サイト名_20260414_123456_<lp_token>/
     ├── INPUT_SHEET.md   ← 入力内容の記録
     ├── index.html       ← 生成されたLP
     ├── style.css        ← デザイン（共有）
     ├── script.js        ← インタラクション（共有）
-    └── pexels.js        ← 画像自動取得（共有）
+    ├── pexels.js        ← 画像自動取得（共有）
+    └── custom/
+        ├── lp_meta.json ← lp_token / site_key（サーバー側でサイト識別用）
+        └── config.json  ← 任意（顧客画像差し替え時）
 ```
+
+`<lp_token>` は 24 桁の十六進（一意 ID）。フォルダ名全体が `site_key` で、公開 URL のパスおよび SFTP のリモートディレクトリ名と一致します。
 
 ## ファイル構成
 

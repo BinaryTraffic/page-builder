@@ -1,0 +1,46 @@
+body {
+  font-family: Arial, sans-serif;
+  background: #f5f6f8;
+  margin: 0;
+}
+.wrap {
+  max-width: 720px;
+  margin: 32px auto;
+  padding: 0 16px;
+}
+.card {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+label {
+  display: block;
+  margin-bottom: 12px;
+}
+input, textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 6px;
+  padding: 8px;
+}
+button {
+  padding: 8px 12px;
+  margin-right: 8px;
+}
+.row {
+  margin-top: 12px;
+}
+.hidden {
+  display: none;
+}
+.note {
+  color: #666;
+}
+pre {
+  background: #111;
+  color: #0f0;
+  padding: 10px;
+  overflow-x: auto;
+}

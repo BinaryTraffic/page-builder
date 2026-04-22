@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LP CMS Admin</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main class="wrap">
+    <h1>LP CMS Admin</h1>
+
+    <section class="card" id="loginCard">
+      <h2>ログイン</h2>
+      <label>ID <input id="loginId" value="lp-admin"></label>
+      <label>Password <input id="loginPw" type="password"></label>
+      <button id="loginBtn">ログイン</button>
+      <p class="note">API: <code>/cms/api/login.php</code></p>
+    </section>
+
+    <section class="card hidden" id="passwordCard">
+      <h2>初回: パスワードを変更</h2>
+      <p class="note">簡易初期パスワードのままでは編集できません。12文字以上の新パスワードを設定してください。</p>
+      <label>現在のパスワード <input id="curPw" type="password" autocomplete="current-password"></label>
+      <label>新しいパスワード <input id="newPw" type="password" autocomplete="new-password" minlength="12"></label>
+      <label>新しいパスワード（確認） <input id="newPw2" type="password" autocomplete="new-password" minlength="12"></label>
+      <button id="changePwBtn">パスワードを更新</button>
+    </section>
+
+    <section class="card hidden" id="siteCard">
+      <h2>編集するLPを選択</h2>
+      <p class="note">`?site_key=` では切り替えず、必ずここで選択してセッションに保存します。</p>
+      <label>LP（site_key）
+        <select id="siteKeySelect"></select>
+      </label>
+      <button type="button" id="selectSiteBtn">このLPで作業</button>
+    </section>
+
+    <section class="card hidden" id="editorCard">
+      <h2>コンテンツ編集</h2>
+      <label>hero image file
+        <input id="heroImage" placeholder="hero.jpg">
+      </label>
+      <label>hero title
+        <input id="heroTitle" placeholder="タイトル">
+      </label>
+      <label>hero desc
+        <textarea id="heroDesc" rows="3" placeholder="説明文"></textarea>
+      </label>
+      <div class="row">
+        <button type="button" id="switchSiteBtn">LPを切替</button>
+        <button id="loadBtn">再読込</button>
+        <button id="saveBtn">保存</button>
+        <button id="logoutBtn">ログアウト</button>
+      </div>
+      <pre id="status"></pre>
+    </section>
+  </main>
+  <script src="./main.js"></script>
+</body>
+</html>

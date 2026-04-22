@@ -1,0 +1,6 @@
+# 本番秘密・ランタイム（誤コミット防止）
+cms/data/**/*.json
+cms/data/audit.log
+cms/data/**/content.json
+!cms/data/**/.gitkeep
+!cms/data/README.md

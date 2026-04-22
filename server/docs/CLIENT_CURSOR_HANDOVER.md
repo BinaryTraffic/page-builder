@@ -57,6 +57,12 @@
 
 ---
 
+## Git での連携（やり取りを短く）
+
+依頼や変更の「正」は **このリポジトリのコミットと Markdown** にまとめる。共通ルールは **`server/docs/GIT_WORKFLOW.md`**。
+
+---
+
 ## 参照 MD（リポ同梱）
 
 - `PC_HANDOVER_RESULT.md` — PC 担当向けの短い要約

@@ -6,3 +6,5 @@
 - `docs/` — 設計・引き渡し用 Markdown
 
 `cms/data/` は本番の秘密を置くため、リポジトリでは `.gitkeep` のみ。手順は `docs/SERVER_SETUP.md`。
+
+クライアントとの連絡を Git にまとめる約束は **`docs/GIT_WORKFLOW.md`**。

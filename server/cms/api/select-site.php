@@ -6,6 +6,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     json_response(['ok' => false, 'error' => 'method_not_allowed'], 405);
 }
 
+setup_session();
+if ((string) ($_SESSION['site_auth_lp_token'] ?? '') !== '') {
+    json_response(['ok' => false, 'error' => 'site_auth_no_select'], 403);
+}
+
 $userId = require_auth();
 require_csrf();
 
@@ -27,7 +32,6 @@ if ($lpToken === '') {
     json_response(['ok' => false, 'error' => 'registry_broken'], 500);
 }
 
-setup_session();
 $_SESSION['active_site_key'] = $siteKey;
 $_SESSION['active_lp_token'] = $lpToken;
 

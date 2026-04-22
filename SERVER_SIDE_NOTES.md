@@ -17,7 +17,7 @@
 ## 記入欄
 
 ### 2026-04-23
-- （ここから追記）
+- LP ごとに CMS ユーザー `lp_<24hex lp_token>` を台帳同期時に自動作成。初期パスは環境変数 `LP_SITE_INITIAL_PASSWORD`（未設定時 `Whatisthepassword?`）。**既存ディレクトリはデプロイ後に `sync-sites-from-lp-meta.php` を再実行してユーザーを埋める。**
 
 
 ---

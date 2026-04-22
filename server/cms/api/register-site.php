@@ -19,13 +19,17 @@ if (!((bool)($user['can_register_sites'] ?? true))) {
 }
 
 $input = get_request_json();
-$lpToken = trim((string)($input['lp_token'] ?? ''));
+$lpToken = strtolower(trim((string)($input['lp_token'] ?? '')));
 $siteKey = trim((string)($input['site_key'] ?? ''));
 if ($lpToken === '' || $siteKey === '') {
     json_response(['ok' => false, 'error' => 'invalid_request'], 400);
 }
-if (!preg_match('/^[a-zA-Z0-9._-]+$/', $lpToken) || !preg_match('/^[a-zA-Z0-9._-]+$/', $siteKey)) {
-    json_response(['ok' => false, 'error' => 'invalid_identifiers'], 400);
+if (!preg_match('/^[a-f0-9]{24}$/', $lpToken)) {
+    json_response(['ok' => false, 'error' => 'invalid_lp_token'], 400);
+}
+if (strlen($siteKey) > 500 || preg_match('/[\x00-\x1f]/', $siteKey)
+    || str_contains($siteKey, '..') || str_contains($siteKey, '/')) {
+    json_response(['ok' => false, 'error' => 'invalid_site_key'], 400);
 }
 
 $dr = get_document_root();
@@ -74,5 +78,10 @@ if (!is_file($cp)) {
         ]
     );
 }
+
 append_audit($userId, 'register_site', ['site_key' => $siteKey, 'lp_token' => $lpToken]);
-json_response(['ok' => true, 'site_key' => $siteKey, 'lp_token' => $lpToken]);
+json_response([
+    'ok' => true,
+    'site_key' => $siteKey,
+    'lp_token' => $lpToken,
+]);

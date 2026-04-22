@@ -10,6 +10,11 @@ setup_session();
 $userId = (string) ($_SESSION['user_id'] ?? '');
 if ($userId !== '') {
     append_audit($userId, 'logout', []);
+} else {
+    $siteSk = (string) ($_SESSION['site_auth_site_key'] ?? '');
+    if ($siteSk !== '') {
+        append_audit('site:' . $siteSk, 'logout', []);
+    }
 }
 
 $_SESSION = [];

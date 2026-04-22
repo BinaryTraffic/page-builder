@@ -1,63 +1,46 @@
-# PC側連携用: サーバー作業結果（2026-04-23）
+# PC側連携用: サーバーとの接続前提（2026-04-23 更新）
 
-このファイルは、PC側（LP Builder側）への連携情報です。  
-サーバー側の実装・設定変更は完了しており、以下の前提でPC側の接続先を使用してください。
-
----
-
-## 1) 結論（PC側が使う値）
-
-- 公開URL: `https://jitan.app/`
-- 編集URL: `https://jitan.app/cms/admin/`
-- APIベース: `https://jitan.app/cms/api/`
-- ログインID: `lp-admin`
-- 一時（初回）パスワード: `Whatisthepassword?`（**サーバーの `users.json` ハッシュの元**と同じ平文にすること）
-  - 初回ログイン後、必須のパスワード変更で本番用に更新する
+このファイルは **LP Builder（PC）側**への連携用です。**仕様の主体はクライアント**（生成する `custom/` 以下）です。
 
 ---
 
-## 2) サーバー側で完了した内容
+## 1) PC側が使う値（URL）
 
-- Apache vhost統一（`jitan.app`）
-- `/admin` を `/cms/admin/` へリダイレクト
-- PHP版CMS APIを実装
-  - `login.php` / `logout.php` / `me.php` / `content.php` / `upload-image.php`
-- 編集UIを実装
-  - `cms/admin/index.html` + `main.js` + `style.css`
-- データ保護を有効化
-  - `/cms/data/*` 直アクセスは `403`
-- 旧FastAPIサービスは停止・削除済み
+- 公開 URL: `https://jitan.app/`
+- 編集 URL: `https://jitan.app/cms/admin/`（可能なら **`?site_key=<出力フォルダ名>`** を付与）
+- API ベース: `https://jitan.app/cms/api/`
 
 ---
 
-## 3) 動作確認結果（サーバー側実施済み）
+## 2) ログインの考え方（2 系統）
 
-- `GET https://jitan.app/cms/admin/` -> `200 OK`
-- `GET https://jitan.app/admin` -> `/cms/admin/` へ `302`
-- `GET https://jitan.app/cms/data/content.json` -> `403 Forbidden`
-- APIフロー:
-  - `POST /cms/api/login.php` -> OK
-  - `GET /cms/api/me.php` -> OK
-  - `GET /cms/api/content.php` -> OK
-  - `PUT /cms/api/content.php` -> OK
+### LP を編集する（納品先・通常）
 
----
+- **サイトキー** = 出力フォルダ名（URL の `/<site_key>/` と一致）
+- **パスワード** = LP 生成時に **`custom/cms_credentials.json`** に書き込んだ初期値と同じ（Builder ②「初期 PW」と一致させる）
+- ブラウザでは管理画面から **`POST /cms/api/site-login.php`**（実装は `server/cms/`）。**ログイン ID は `lp_<token>` ではない**。
 
-## 4) PC側で実施してほしい確認
+### サーバー運用管理者のみ（任意）
 
-- LP Builderの表示URLを以下へ統一
-  - 編集URL: `https://jitan.app/cms/admin/`
-- 初期ログイン情報の表示/コピー動線を確認
-- SFTPアップロード後、以下を結合テスト
-  1. CMSへログイン
-  2. 画像/文言を編集
-  3. 保存
-  4. 公開LPへの反映確認
+- **`POST /cms/api/login.php`** — ID 例: **`lp-admin`**
+- 初期（一時）パスワードは **`cms/data/users.json`** のハッシュとペア。**LP ごとにユーザを増やす方式ではない**。
 
 ---
 
-## 5) 注意事項
+## 3) PC側で実施してほしいこと（優先）
 
-- 上記一時パスは初回ログイン専用。**変更後の本番パス**を平文でドキュメントに残さないこと
-- `cms/data` の公開禁止設定を解除しないこと
-- APIパスは必ず `/cms/api/*` を使用すること
+- 生成に **`custom/cms_credentials.json`** を含める（リポジトリの `lp_builder` 実装に従う）
+- ②に **編集 URL・site_key（フォルダ名）・初期 PW** を表示
+- SFTP 後の結合テスト: **site-login** →（必要ならパス変更）→ 保存 → 公開反映
+
+---
+
+## 4) 注意
+
+- 一時パスを平文で長期保管しない
+- API は **`/cms/api/*`**
+- サーバー側の実装の正はリポジトリ **`server/cms/`**（本番は別環境で追従）
+
+---
+
+最終更新: 2026-04-23（認証二系統・クライアント生成 credentials に整合）

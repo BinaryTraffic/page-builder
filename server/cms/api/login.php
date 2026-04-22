@@ -48,7 +48,13 @@ write_json(LOGIN_ATTEMPTS_FILE, $attempts);
 
 $_SESSION['user_id'] = $id;
 $_SESSION['csrf'] = bin2hex(random_bytes(24));
-unset($_SESSION['active_site_key'], $_SESSION['active_lp_token']);
+unset(
+    $_SESSION['active_site_key'],
+    $_SESSION['active_lp_token'],
+    $_SESSION['site_auth_site_key'],
+    $_SESSION['site_auth_lp_token'],
+    $_SESSION['site_auth_must_change_password'],
+);
 
 append_audit($id, 'login');
 json_response([

@@ -9,7 +9,11 @@ const ERR_JA = {
   site_not_selected: "先に「編集するLP」で site を選んでください。",
   site_forbidden: "このLPへのアクセスは許可されていません。",
   site_unknown: "登録のない site_key です。",
-  invalid_site_session: "セッションのLP情報が不正です。LPを選び直してください。"
+  invalid_site_session: "セッションのLP情報が不正です。LPを選び直してください。",
+  credentials_not_found: "この site_key に cms_credentials.json がありません。LP をアップロード済みか確認してください。",
+  lp_token_mismatch: "資格情報と lp_meta.json の lp_token が一致しません。",
+  site_auth_no_select: "サイトパスワードログインでは LP の切替はできません。ログアウトして管理者でログインしてください。",
+  invalid_credentials_file: "サーバー側の資格情報ファイルが不正です。LP を再生成してください。"
 };
 
 function errMessage(err) {
@@ -33,6 +37,11 @@ function readPendingSiteKeyFromUrl() {
 }
 
 let pendingSiteKeyFromUrl = readPendingSiteKeyFromUrl();
+
+const siteKeyLoginInput = document.getElementById("siteKeyLogin");
+if (siteKeyLoginInput && pendingSiteKeyFromUrl) {
+  siteKeyLoginInput.value = pendingSiteKeyFromUrl;
+}
 
 function stripSiteKeyQueryFromAddressBar() {
   if (!pendingSiteKeyFromUrl) return;
@@ -113,6 +122,10 @@ async function loadContent() {
  */
 async function applyMeData(data) {
   csrf = data.csrf || "";
+  const switchBtn = document.getElementById("switchSiteBtn");
+  if (switchBtn) {
+    switchBtn.style.display = data.auth === "site" ? "none" : "";
+  }
   if (data.user?.must_change_password) {
     showOnly(passwordCard);
     return;
@@ -197,8 +210,27 @@ async function fetchMeAndApply() {
 
 document.getElementById("loginBtn").addEventListener("click", async () => {
   try {
-    const id = document.getElementById("loginId").value;
+    const siteKey = (document.getElementById("siteKeyLogin").value || "").trim();
     const password = document.getElementById("loginPw").value;
+    if (siteKey) {
+      const { response, data } = await rawApi("/cms/api/site-login.php", {
+        method: "POST",
+        body: JSON.stringify({ site_key: siteKey, password })
+      });
+      if (!response.ok) {
+        const err = new Error(data.error || `HTTP ${response.status}`);
+        err.code = data.error;
+        throw err;
+      }
+      csrf = data.csrf || "";
+      if (data.must_change_password) {
+        showOnly(passwordCard);
+      } else {
+        await fetchMeAndApply();
+      }
+      return;
+    }
+    const id = document.getElementById("loginId").value;
     const { response, data } = await rawApi("/cms/api/login.php", {
       method: "POST",
       body: JSON.stringify({ id, password })
@@ -268,7 +300,14 @@ document.getElementById("selectSiteBtn").addEventListener("click", async () => {
 
 document.getElementById("switchSiteBtn").addEventListener("click", async () => {
   try {
-    const me = await api("/cms/api/me.php", { method: "GET" });
+    const { response, data: me } = await rawApi("/cms/api/me.php", { method: "GET" });
+    if (!response.ok) {
+      throw new Error(me.error || `HTTP ${response.status}`);
+    }
+    if (me.auth === "site") {
+      alert(ERR_JA.site_auth_no_select);
+      return;
+    }
     csrf = me.csrf || "";
     fillSiteSelect(me.sites);
     if (me.active_site_key) {

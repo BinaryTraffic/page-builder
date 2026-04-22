@@ -5,8 +5,7 @@ require_once __DIR__ . '/bootstrap.php';
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
 if ($method === 'GET') {
-    $userId = require_auth();
-    $ctx = require_active_site_for_editing($userId);
+    $ctx = require_active_site_for_editing();
     $content = read_json($ctx['content_path'], [
         'images' => (object) [],
         'texts' => (object) [],
@@ -16,8 +15,7 @@ if ($method === 'GET') {
 }
 
 if ($method === 'PUT') {
-    $userId = require_auth();
-    $ctx = require_active_site_for_editing($userId);
+    $ctx = require_active_site_for_editing();
     require_csrf();
     $input = get_request_json();
     $images = is_array($input['images'] ?? null) ? $input['images'] : [];
@@ -26,11 +24,11 @@ if ($method === 'PUT') {
         'images' => $images,
         'texts' => $texts,
         'updated_at' => now_iso8601(),
-        'updated_by' => $userId,
+        'updated_by' => $ctx['audit_user'],
     ];
     write_json($ctx['content_path'], $content);
     append_audit(
-        $userId,
+        $ctx['audit_user'],
         'content_update',
         [
             'fields' => ['images', 'texts'],

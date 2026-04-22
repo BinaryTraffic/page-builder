@@ -6,8 +6,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     json_response(['ok' => false, 'error' => 'method_not_allowed'], 405);
 }
 
-$userId = require_auth();
-$ctx = require_active_site_for_editing($userId);
+$ctx = require_active_site_for_editing();
 require_csrf();
 
 $siteKey = $ctx['site_key'];
@@ -43,7 +42,7 @@ if (!move_uploaded_file($tmp, $destPath)) {
 }
 
 append_audit(
-    $userId,
+    $ctx['audit_user'],
     'image_upload',
     [
         'file' => $finalName,

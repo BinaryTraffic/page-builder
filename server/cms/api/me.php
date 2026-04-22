@@ -6,6 +6,27 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET') {
     json_response(['ok' => false, 'error' => 'method_not_allowed'], 405);
 }
 
+setup_session();
+
+if ((string) ($_SESSION['site_auth_lp_token'] ?? '') !== '') {
+    $must = (bool) ($_SESSION['site_auth_must_change_password'] ?? false);
+    $sk = (string) ($_SESSION['site_auth_site_key'] ?? '');
+    $lt = (string) ($_SESSION['site_auth_lp_token'] ?? '');
+    json_response([
+        'ok' => true,
+        'auth' => 'site',
+        'user' => [
+            'id' => 'site',
+            'must_change_password' => $must,
+        ],
+        'allowed_site_keys' => $sk !== '' ? [$sk] : [],
+        'active_site_key' => $sk,
+        'active_lp_token' => $lt,
+        'sites' => $sk !== '' ? [['site_key' => $sk, 'lp_token' => $lt]] : [],
+        'csrf' => get_csrf_token(),
+    ]);
+}
+
 $userId = require_auth();
 $user = get_user_record($userId);
 $must = (bool) ($user['must_change_password'] ?? false);
@@ -30,6 +51,7 @@ foreach (load_sites_registry() as $row) {
 
 json_response([
     'ok' => true,
+    'auth' => 'user',
     'user' => [
         'id' => $userId,
         'must_change_password' => $must,

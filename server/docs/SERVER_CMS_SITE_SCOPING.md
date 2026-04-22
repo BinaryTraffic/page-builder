@@ -1,7 +1,9 @@
-# サーバー作業指示: CMS を LP 単位（site_key）に分離する
+# CMS を LP 単位（site_key）に分離する — 参照仕様
 
-最終更新: 2026-04-23 05:53:08 +09:00
-前提: 静的は `…/<site_key>/` ＋ `custom/lp_meta.json`。詳細は `SERVER_SETUP.md`。
+最終更新: 2026-04-23  
+前提: 静的は `…/<site_key>/` ＋ **`custom/lp_meta.json`**（および **`custom/cms_credentials.json`**）。詳細はルートの `SERVER_SETUP.md`。
+
+**読み替え:** LP 編集者は **`site-login`** でディレクトリ内資格情報を検証。**台帳・`allowed_site_keys`・`select-site`** は **管理者ログイン（`users.json`）経路**が主対象。
 
 ---
 
@@ -35,8 +37,9 @@
 
 ## セキュリティ
 
-- クライアントの `lp_meta.json` だけ**では認可しない**（台帳はサーバー管理が正）。  
-- 他ユーザの `site_key` へ**保存・読取できない**こと。
+- **管理者経路:** `lp_meta.json` だけでは認めず、台帳と `allowed_site_keys` で許可する。  
+- **`site-login` 経路:** `{DOCUMENT_ROOT}/{site_key}/custom/cms_credentials.json` とパスワード・`lp_token` 整合で許可する（別 LP のディレクトリには触れない）。  
+- いずれの経路でも、**他サイトの `site_key` に越権保存しない**こと。
 
 ---
 
@@ -48,6 +51,6 @@
 
 ---
 
-## LP Builder 側
+## LP Builder 側（主体）
 
-- **変更不要**（SFTP 先は従来どおり `…/<site_key>/`）
+- SFTP 先は従来どおり `…/<site_key>/`。生成時に **`custom/cms_credentials.json`** を同梱すること（**仕様の正はクライアント実装**）。

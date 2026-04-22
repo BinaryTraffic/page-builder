@@ -191,19 +191,41 @@ function clear_active_site_in_session(): void
 }
 
 /**
- * 編集用API向け: 未変更パス、サイト未選択、台帳/許可不一致を排除。
- * @return array{site_key: string, lp_token: string, content_path: string}
+ * 編集用API向け: LP ディレクトリの cms_credentials.json でログインしたセッション、または users.json ユーザー。
+ *
+ * @return array{site_key: string, lp_token: string, content_path: string, audit_user: string}
  */
-function require_active_site_for_editing(string $userId): array
+function require_active_site_for_editing(): array
 {
-    require_editing_allowed($userId);
+    setup_session();
     $sk = get_active_site_key_from_session();
     $lt = get_active_lp_token_from_session();
+
+    $siteLt = (string) ($_SESSION['site_auth_lp_token'] ?? '');
+    if ($siteLt !== '') {
+        if ($sk === null || $lt === null || $sk !== (string) ($_SESSION['site_auth_site_key'] ?? '') || $lt !== $siteLt) {
+            clear_active_site_in_session();
+            json_response(['ok' => false, 'error' => 'invalid_site_session'], 400);
+        }
+        if ((bool) ($_SESSION['site_auth_must_change_password'] ?? false)) {
+            json_response(['ok' => false, 'error' => 'password_change_required'], 403);
+        }
+        $path = content_path_for_lp_token($lt);
+        return [
+            'site_key' => $sk,
+            'lp_token' => $lt,
+            'content_path' => $path,
+            'audit_user' => 'site:' . $sk,
+        ];
+    }
+
+    $userId = require_auth();
+    require_editing_allowed($userId);
     if ($sk === null || $lt === null) {
         json_response(['ok' => false, 'error' => 'site_not_selected'], 400);
     }
     $row = get_site_by_site_key($sk);
-    if ($row === null || (string)($row['lp_token'] ?? '') !== $lt) {
+    if ($row === null || (string) ($row['lp_token'] ?? '') !== $lt) {
         clear_active_site_in_session();
         json_response(['ok' => false, 'error' => 'invalid_site_session'], 400);
     }
@@ -215,6 +237,7 @@ function require_active_site_for_editing(string $userId): array
         'site_key' => $sk,
         'lp_token' => $lt,
         'content_path' => $path,
+        'audit_user' => $userId,
     ];
 }
 

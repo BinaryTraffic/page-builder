@@ -57,6 +57,8 @@ APP_VERSION = "1.0.0"
 CONFIG_FILE = Path.home() / ".lp_builder_config.json"
 # API 利用明細（追記型）。ホーム直下に保存し、別名エクスポートも可能。
 USAGE_LEDGER_JSON = Path.home() / ".lp_builder_api_usage.json"
+# サイト専用 CMS ユーザー（サーバ環境変数 LP_SITE_INITIAL_PASSWORD と揃える）
+CMS_SITE_INITIAL_PASSWORD = "Whatisthepassword?"
 
 BG_DARK   = "#1a1a1a"
 BG_PANEL  = "#242424"
@@ -415,7 +417,9 @@ class LPBuilderApp(tk.Tk):
         _route = self.sftp_route_url_var.get().strip().rstrip("/")
         self.cms_editor_url_var = tk.StringVar(value="")
         self.cms_admin_user_var = tk.StringVar(value=str(env.get("CMS_ADMIN_USER") or cd.get("cms_admin_user", "lp-admin")).strip())
-        self.cms_admin_pass_var = tk.StringVar(value=str(env.get("CMS_ADMIN_TEMP_PASS") or cd.get("cms_admin_temp_pass", "<SET_NEW_PASSWORD_HERE>")).strip())
+        self.cms_admin_pass_var = tk.StringVar(
+            value=str(env.get("CMS_ADMIN_TEMP_PASS") or cd.get("cms_admin_temp_pass") or CMS_SITE_INITIAL_PASSWORD).strip()
+        )
         self.sftp_route_url_var.trace_add("write", lambda *_: self._refresh_cms_editor_url())
 
         self._build_ui()
@@ -709,7 +713,7 @@ class LPBuilderApp(tk.Tk):
 
         row = tk.Frame(f, bg=BG_INPUT)
         row.pack(fill="x", padx=16, pady=4)
-        tk.Label(row, text="ログインID", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
+        tk.Label(row, text="site_key（フォルダ名）", width=14, anchor="w", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left")
         tk.Entry(
             row,
             textvariable=self.cms_admin_user_var,
@@ -723,7 +727,7 @@ class LPBuilderApp(tk.Tk):
             state="normal",
             width=24,
         ).pack(side="left", padx=4)
-        tk.Label(row, text="一時PW", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left", padx=(16, 0))
+        tk.Label(row, text="初期PW", bg=BG_INPUT, fg=FG_SUB, font=FONT_BODY).pack(side="left", padx=(16, 0))
         tk.Entry(
             row,
             textvariable=self.cms_admin_pass_var,
@@ -2021,6 +2025,31 @@ class LPBuilderApp(tk.Tk):
         self._log("完了！localhost でプレビューを開きます...")
         self.after(0, self._on_generate_done, True, str(out_dir))
 
+    def _cms_password_bcrypt_hash(self, plain: str) -> str:
+        """PHP password_hash(PASSWORD_DEFAULT) と互換の bcrypt。"""
+        import bcrypt  # type: ignore
+
+        return bcrypt.hashpw(
+            plain.encode("utf-8"),
+            bcrypt.gensalt(rounds=10),
+        ).decode("ascii")
+
+    def _write_cms_credentials(self, custom_dir: Path, *, site_key: str, lp_token: str) -> None:
+        """サーバー CMS が参照する LP 直下の資格情報（users.json は使わない）。"""
+        plain = (self.cms_admin_pass_var.get().strip() or CMS_SITE_INITIAL_PASSWORD)
+        must_change = plain == CMS_SITE_INITIAL_PASSWORD
+        cred = {
+            "lp_token": lp_token.lower(),
+            "site_key": site_key,
+            "password_hash": self._cms_password_bcrypt_hash(plain),
+            "must_change_password": must_change,
+        }
+        (custom_dir / "cms_credentials.json").write_text(
+            json.dumps(cred, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self._log("custom/cms_credentials.json を保存（CMS の site-login 用）")
+
     def _copy_shared_files(self, out_dir: Path, sheet: dict, *, lp_token: str = ""):
         """選択テーマの CSS を style.css としてコピーし、script.js / pexels.js を同梱。custom/lp_meta.json でサーバーへトークンを引き渡す。"""
         import shutil
@@ -2055,6 +2084,7 @@ class LPBuilderApp(tk.Tk):
                 encoding="utf-8",
             )
             self._log("custom/lp_meta.json を保存（サーバー側でサイト識別用）")
+            self._write_cms_credentials(custom_dir, site_key=site_key, lp_token=lp_token)
         ex = APP_DIR / "custom_config.example.json"
         if ex.exists():
             shutil.copy2(ex, custom_dir / "config.example.json")
@@ -2141,6 +2171,7 @@ class LPBuilderApp(tk.Tk):
         if success:
             self._last_generated_out_dir = out_dir
             self._set_last_site_key(str(Path(out_dir).name))
+            self._apply_cms_login_from_lp_meta(out_dir)
             preview_url = self._open_local_preview(out_dir)
             msg_extra = (
                 f"\nプレビュー:\n{preview_url}\n"
@@ -2323,7 +2354,7 @@ class LPBuilderApp(tk.Tk):
         data["SFTP_REMOTE_DIR"] = self.sftp_remote_dir_var.get().strip()
         data["SFTP_ROUTE_URL"] = self.sftp_route_url_var.get().strip() or "https://www.jitan.app/"
         data["CMS_ADMIN_USER"] = self.cms_admin_user_var.get().strip() or "lp-admin"
-        data["CMS_ADMIN_TEMP_PASS"] = self.cms_admin_pass_var.get().strip() or "<SET_NEW_PASSWORD_HERE>"
+        data["CMS_ADMIN_TEMP_PASS"] = self.cms_admin_pass_var.get().strip() or CMS_SITE_INITIAL_PASSWORD
         lines = [f'{k}="{str(v).replace(chr(34), "\\\"")}"' for k, v in sorted(data.items())]
         plain = "\n".join(lines) + "\n"
         if os.name == "nt":
@@ -2353,6 +2384,15 @@ class LPBuilderApp(tk.Tk):
             CONFIG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         except Exception:
             pass
+
+    def _apply_cms_login_from_lp_meta(self, out_dir: str) -> None:
+        """生成済み LP のフォルダ名（site_key）と初期パスを②に反映（CMS は site_key + cms_credentials のパスワード）。"""
+        root = Path(out_dir)
+        sk = root.name.strip()
+        if sk:
+            self.cms_admin_user_var.set(sk)
+        self.cms_admin_pass_var.set(CMS_SITE_INITIAL_PASSWORD)
+        self._refresh_cms_editor_url()
 
     def _refresh_cms_editor_url(self) -> None:
         route = (self.sftp_route_url_var.get() or "").strip().rstrip("/")
@@ -2561,6 +2601,12 @@ class LPBuilderApp(tk.Tk):
         remote_release_dir = posixpath.join(remote_base.rstrip("/"), site_key)
         pdf_path = self._make_site_info_pdf(out_dir, site_key, lp_token=lp_tok)
         self._save_sftp_env(silent=True)
+        cred_rel = out_dir / "custom" / "cms_credentials.json"
+        if not cred_rel.is_file():
+            self._log(
+                "警告: custom/cms_credentials.json がありません。LP を再生成するか CMS 用資格情報を配置してください。",
+                WARN_MSG,
+            )
         self._log(
             f"SFTPアップロード開始: {remote_release_dir}（site_key={site_key}, lp_token={lp_tok or '—'}）"
         )
@@ -2576,6 +2622,7 @@ class LPBuilderApp(tk.Tk):
             public_url = f"{route}/{site_key}/index.html" if route else f"/{site_key}/index.html"
             self.sftp_link_var.set(public_url)
             self._set_last_site_key(site_key)
+            self._apply_cms_login_from_lp_meta(str(out_dir))
             self._log(f"SFTPアップロード完了: {public_url}", GREEN_OK)
             messagebox.showinfo("アップロード完了", f"アップロードが完了しました。\n\n{public_url}")
             try:

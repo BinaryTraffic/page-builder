@@ -69,5 +69,6 @@ closedir($dh);
 
 ksort($merged);
 save_sites_registry(array_values($merged));
+
 $count = count($merged);
 echo "sync-sites-from-lp-meta: OK, sites={$count}, docroot={$docRoot}\n";

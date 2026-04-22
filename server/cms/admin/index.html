@@ -12,10 +12,16 @@
 
     <section class="card" id="loginCard">
       <h2>ログイン</h2>
-      <label>ID <input id="loginId" value="lp-admin"></label>
-      <label>Password <input id="loginPw" type="password"></label>
+      <p class="note">
+        <strong>LP を編集</strong>するときは「site_key」（アップロードしたフォルダ名）と
+        <code>custom/cms_credentials.json</code> と同じパスワード。<br>
+        site_key が空ならサーバー<strong>管理者</strong>（例: lp-admin）。
+      </p>
+      <label>site_key（LPフォルダ名） <input id="siteKeyLogin" placeholder="空なら管理者ログイン" autocomplete="username"></label>
+      <label>管理者ID <input id="loginId" placeholder="lp-admin" autocomplete="username"></label>
+      <label>パスワード <input id="loginPw" type="password" autocomplete="current-password"></label>
       <button id="loginBtn">ログイン</button>
-      <p class="note">API: <code>/cms/api/login.php</code></p>
+      <p class="note">LP: <code>/cms/api/site-login.php</code> · 管理者: <code>/cms/api/login.php</code></p>
     </section>
 
     <section class="card hidden" id="passwordCard">

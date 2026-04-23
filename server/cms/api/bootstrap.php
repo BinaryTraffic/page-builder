@@ -264,6 +264,47 @@ function now_iso8601(): string
     return (new DateTimeImmutable('now', new DateTimeZone('Asia/Tokyo')))->format(DateTimeInterface::ATOM);
 }
 
+/**
+ * LP 公開ディレクトリ用: custom/cms_page_state.json（静的ページの overlay-apply.js が読む）
+ */
+function mirror_cms_page_state_to_site_custom(string $siteKey, array $content): void
+{
+    if ($siteKey === '' || preg_match('/[\x00-\x1f]/', $siteKey) || str_contains($siteKey, '..') || str_contains($siteKey, '/')) {
+        return;
+    }
+    $dr = get_document_root();
+    $dir = $dr . '/' . $siteKey . '/custom';
+    if (!is_dir($dir)) {
+        if (!@mkdir($dir, 0755, true) && !is_dir($dir)) {
+            return;
+        }
+    }
+    $images = $content['images'] ?? [];
+    $texts = is_array($content['texts'] ?? null) ? $content['texts'] : [];
+    $hero = $images['hero'] ?? null;
+    $heroUrl = null;
+    if (is_string($hero) && $hero !== '') {
+        $base = $hero;
+        if (!preg_match('#^https?://#i', $base) && $base[0] !== '.') {
+            $heroUrl = './custom/' . ltrim($base, '/');
+        } else {
+            $heroUrl = $base;
+        }
+    } elseif (is_array($hero) && isset($hero['url']) && is_string($hero['url']) && $hero['url'] !== '') {
+        $heroUrl = $hero['url'];
+    }
+    $out = [
+        'texts' => $texts,
+        'images' => [],
+        'updated_at' => $content['updated_at'] ?? now_iso8601(),
+    ];
+    if ($heroUrl !== null) {
+        $out['images']['hero'] = ['url' => $heroUrl];
+    }
+    $path = $dir . '/cms_page_state.json';
+    write_json($path, $out);
+}
+
 function append_audit(string $userId, string $action, array $meta = []): void
 {
     setup_session();

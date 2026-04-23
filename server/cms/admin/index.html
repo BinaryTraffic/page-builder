@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>LP CMS Admin</title>
   <link rel="stylesheet" href="./style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300&display=swap" rel="stylesheet">
 </head>
 <body>
   <main class="wrap">
@@ -49,20 +52,51 @@
 
     <section class="card hidden" id="editorCard">
       <h2>コンテンツ編集</h2>
-      <label>hero image file
-        <input id="heroImage" placeholder="hero.jpg">
-      </label>
-      <label>hero title
-        <input id="heroTitle" placeholder="タイトル">
-      </label>
-      <label>hero desc
-        <textarea id="heroDesc" rows="3" placeholder="説明文"></textarea>
-      </label>
-      <div class="row">
-        <button type="button" id="switchSiteBtn">LPを切替</button>
-        <button id="loadBtn">再読込</button>
-        <button id="saveBtn">保存</button>
-        <button id="logoutBtn">ログアウト</button>
+      <p class="note">左で入力 → 右のプレビューが近い雰囲気で更新されます（本番 LP のヒーロー帯に準拠したスタイル）。保存後、公開ページは <code>custom/cms_page_state.json</code> 経由で反映（<code>/cms/overlay-apply.js</code> 読込が必要）。</p>
+
+      <div class="editor-layout">
+        <div class="editor-fields">
+          <h3 class="ed-h3">画像</h3>
+          <p class="note">アップロードで <code>…/custom/</code> に保存し、下のファイル名に自動入力されます。</p>
+          <div class="row-inline">
+            <input type="file" id="heroFile" accept="image/jpeg,image/png,image/webp" class="file-input" hidden>
+            <button type="button" class="btn-secondary" id="heroUploadBtn">ヒーロー背景をアップロード</button>
+          </div>
+          <label>背景画像ファイル名（<code>custom/</code> 内）
+            <input id="heroImage" placeholder="例: photo_20260101120000.jpg" autocomplete="off">
+          </label>
+
+          <h3 class="ed-h3">文言（ページ内の代表テキスト）</h3>
+          <label>サブ見出し <span class="opt">（.hero-sub）</span>
+            <input id="heroSub" placeholder="英字のキャッチ等" autocomplete="off">
+          </label>
+          <label>メインタイトル <span class="opt">（.hero-title）</span>
+            <input id="heroTitle" placeholder="タイトル" autocomplete="off">
+          </label>
+          <label>リード文 <span class="opt">（.hero-desc）</span>
+            <textarea id="heroDesc" rows="4" placeholder="説明文"></textarea>
+          </label>
+          <div class="row">
+            <button type="button" id="switchSiteBtn">LPを切替</button>
+            <button type="button" id="loadBtn">再読込</button>
+            <button type="button" id="saveBtn">保存</button>
+            <button type="button" id="logoutBtn">ログアウト</button>
+          </div>
+        </div>
+        <div class="editor-preview" aria-label="ヒーロー帯プレビュー">
+          <div class="preview-chrome">プレビュー</div>
+          <div class="preview-hero" id="previewRoot">
+            <div class="preview-hero-bg" id="previewHeroBg"></div>
+            <div class="preview-hero-overlay"></div>
+            <div class="preview-hero-content">
+              <div class="preview-glass">
+                <p class="preview-hero-sub" id="previewHeroSub"></p>
+                <h2 class="preview-hero-title" id="previewHeroTitle">タイトル</h2>
+                <p class="preview-hero-desc" id="previewHeroDesc">リード文のプレースホルダー</p>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
       <pre id="status"></pre>
     </section>

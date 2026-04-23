@@ -23,8 +23,12 @@ Last updated: 2026-04-23 05:53:08 +09:00
   - `POST /cms/api/register-site.php`（台帳＋自ユーザ `allowed` 追記。任意）
 - **Browser Editor**
   - ログイン
-  - 画像/文言編集
-  - `content.json` 保存
+  - 画像/文言編集（管理 UI はヒーロー帯イメージのプレビュー付き）
+  - `content.json` 保存のたびに **`{site_key}/custom/cms_page_state.json`** も生成（公開ページ用のサマリ）
+- **公開 LP への反映（任意・推奨）**
+  - リポジトリの **`server/cms/overlay-apply.js`** を `https://<host>/cms/overlay-apply.js` として配信できるようにする
+  - 各 LP の `index.html` の `</body>` 直前に  
+    `<script src="/cms/overlay-apply.js" defer></script>` を1行追加すると、同じオリジンから `custom/cms_page_state.json` を読み **`.hero-bg` / `.hero-sub` / `.hero-title` / `.hero-desc`** を上書きする
 - **管理画面のディープリンク（クライアントから開く）**
   - 例: `GET /cms/admin/?site_key=作成した site_key`（別名: `for_site`）
   - ブラウザは **ログイン完了後**（または既存セッションで開いた直後）に、内部で `POST /cms/api/select-site.php` を1回投げ、編集画面を開く。サーバが GET だけで `active_site_key` を変えることはない。

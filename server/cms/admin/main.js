@@ -30,6 +30,9 @@ const editorCard = document.getElementById("editorCard");
 const statusEl = document.getElementById("status");
 const siteKeySelect = document.getElementById("siteKeySelect");
 
+/** 編集対象 LP（プレビュー用の公開パス生成） */
+let activeSiteKey = "";
+
 /** クライアント等から `/cms/admin/?site_key=...` で開いたとき用（サーバは GET では切替えない。認可後に POST のみ） */
 function readPendingSiteKeyFromUrl() {
   const p = new URLSearchParams(window.location.search);
@@ -109,12 +112,64 @@ async function postSelectSite(siteKey) {
   });
 }
 
+function heroFilenameFromData(images) {
+  const h = images?.hero;
+  if (typeof h === "string") return h;
+  if (h && typeof h === "object" && typeof h.url === "string") {
+    const u = h.url;
+    const m = u.match(/custom\/([^?'#]+)/);
+    if (m) return decodeURIComponent(m[1]);
+    if (!/^https?:\/\//i.test(u)) return u.replace(/^\.\//, "");
+  }
+  return "";
+}
+
+function heroPreviewUrl() {
+  const raw = (document.getElementById("heroImage")?.value || "").trim();
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (!activeSiteKey) return "";
+  const segs = raw.split("/").filter(Boolean);
+  return (
+    `${window.location.origin}/${encodeURIComponent(activeSiteKey)}/custom/` +
+    segs.map((s) => encodeURIComponent(s)).join("/")
+  );
+}
+
+function syncPreview() {
+  const subEl = document.getElementById("heroSub");
+  const titleEl = document.getElementById("heroTitle");
+  const descEl = document.getElementById("heroDesc");
+  const sub = subEl ? subEl.value || "" : "";
+  const title = titleEl ? titleEl.value || "" : "";
+  const desc = descEl ? descEl.value || "" : "";
+  const pSub = document.getElementById("previewHeroSub");
+  const pTitle = document.getElementById("previewHeroTitle");
+  const pDesc = document.getElementById("previewHeroDesc");
+  const bg = document.getElementById("previewHeroBg");
+  if (pSub) pSub.textContent = sub;
+  if (pTitle) pTitle.textContent = title || "（タイトル）";
+  if (pDesc) pDesc.textContent = desc || "（リード）";
+  const url = heroPreviewUrl();
+  if (bg) {
+    if (url) {
+      bg.style.backgroundImage = "url(" + JSON.stringify(url) + ")";
+      bg.style.backgroundColor = "";
+    } else {
+      bg.style.backgroundImage = "none";
+      bg.style.backgroundColor = "#1a1a22";
+    }
+  }
+}
+
 async function loadContent() {
   const data = await api("/cms/api/content.php", { method: "GET" });
-  document.getElementById("heroImage").value = data.images?.hero || "";
+  document.getElementById("heroImage").value = heroFilenameFromData(data.images || {});
+  document.getElementById("heroSub").value = data.texts?.hero_sub || "";
   document.getElementById("heroTitle").value = data.texts?.hero_title || "";
   document.getElementById("heroDesc").value = data.texts?.hero_desc || "";
   setStatus(JSON.stringify(data, null, 2));
+  syncPreview();
 }
 
 /**
@@ -122,6 +177,7 @@ async function loadContent() {
  */
 async function applyMeData(data) {
   csrf = data.csrf || "";
+  activeSiteKey = data.active_site_key || "";
   const switchBtn = document.getElementById("switchSiteBtn");
   if (switchBtn) {
     switchBtn.style.display = data.auth === "site" ? "none" : "";
@@ -339,10 +395,11 @@ document.getElementById("loadBtn").addEventListener("click", async () => {
 document.getElementById("saveBtn").addEventListener("click", async () => {
   try {
     const payload = {
-      images: { hero: document.getElementById("heroImage").value },
+      images: { hero: (document.getElementById("heroImage").value || "").trim() },
       texts: {
-        hero_title: document.getElementById("heroTitle").value,
-        hero_desc: document.getElementById("heroDesc").value
+        hero_sub: (document.getElementById("heroSub").value || "").trim(),
+        hero_title: (document.getElementById("heroTitle").value || "").trim(),
+        hero_desc: (document.getElementById("heroDesc").value || "").trim()
       }
     };
     const data = await api("/cms/api/content.php", {
@@ -369,6 +426,42 @@ document.getElementById("logoutBtn").addEventListener("click", async () => {
     setStatus("");
   } catch (err) {
     alert(`ログアウト失敗: ${errMessage(err)}`);
+  }
+});
+
+["heroSub", "heroTitle", "heroDesc", "heroImage"].forEach((id) => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("input", () => syncPreview());
+  if (el) el.addEventListener("change", () => syncPreview());
+});
+document.getElementById("heroUploadBtn")?.addEventListener("click", () => {
+  document.getElementById("heroFile")?.click();
+});
+document.getElementById("heroFile")?.addEventListener("change", async (e) => {
+  const f = e.target?.files && e.target.files[0];
+  if (!f) return;
+  try {
+    const fd = new FormData();
+    fd.append("image", f);
+    const res = await fetch("/cms/api/upload-image.php", {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        ...(csrf ? { "X-CSRF-Token": csrf } : {})
+      },
+      body: fd
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(d.error || `HTTP ${res.status}`);
+      err.code = d.error;
+      throw err;
+    }
+    document.getElementById("heroImage").value = d.file || "";
+    syncPreview();
+    e.target.value = "";
+  } catch (err) {
+    alert(errMessage(err));
   }
 });
 

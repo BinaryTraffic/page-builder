@@ -27,6 +27,7 @@ if ($method === 'PUT') {
         'updated_by' => $ctx['audit_user'],
     ];
     write_json($ctx['content_path'], $content);
+    mirror_cms_page_state_to_site_custom($ctx['site_key'], $content);
     append_audit(
         $ctx['audit_user'],
         'content_update',

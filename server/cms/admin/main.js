@@ -412,6 +412,7 @@ document.getElementById("saveBtn").addEventListener("click", async () => {
       body: JSON.stringify(payload)
     });
     setStatus(JSON.stringify(data, null, 2));
+    await loadContent();
   } catch (e) {
     if (e.code === "password_change_required") {
       showOnly(passwordCard);

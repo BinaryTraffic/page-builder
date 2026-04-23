@@ -267,6 +267,71 @@ function now_iso8601(): string
 const LP_DIR_ORIGINAL = '_lp_original';
 const LP_DIR_PUBLISH = '_lp_publish';
 
+/** content.json / meta.status の既定値 */
+const CMS_STATUS_EDITING = 'editing';
+const CMS_STATUS_PREVIEW = 'preview';
+const CMS_STATUS_DEPLOYED = 'deployed';
+
+/**
+ * 旧ファイル互換: meta・日時の既定を揃える（GET/PUT 前に使用）
+ */
+function normalize_content_json(array $data): array
+{
+    $now = now_iso8601();
+    $out = $data;
+    $meta = is_array($out['meta'] ?? null) ? $out['meta'] : [];
+    $defaults = [
+        'dirty' => false,
+        'status' => CMS_STATUS_EDITING,
+        'section_dirty' => [],
+    ];
+    $meta = array_merge($defaults, $meta);
+    if (!in_array($meta['status'], [CMS_STATUS_EDITING, CMS_STATUS_PREVIEW, CMS_STATUS_DEPLOYED], true)) {
+        $meta['status'] = CMS_STATUS_EDITING;
+    }
+    $sec = $meta['section_dirty'] ?? [];
+    if (is_object($sec)) {
+        $sec = (array) $sec;
+    }
+    if (!is_array($sec)) {
+        $sec = [];
+    }
+    $meta['section_dirty'] = $sec;
+    $meta['dirty'] = (bool) ($meta['dirty'] ?? false);
+    $out['meta'] = $meta;
+    if (empty($out['created_at'] ?? null) || !is_string($out['created_at'])) {
+        $out['created_at'] = is_string($out['updated_at'] ?? null) ? (string) $out['updated_at'] : $now;
+    }
+    if (empty($out['updated_at'] ?? null) || !is_string($out['updated_at'])) {
+        $out['updated_at'] = (string) $out['created_at'];
+    }
+    return $out;
+}
+
+/**
+ * _lp_publish 完了後: デプロイ済み扱いに content.json meta を揃える
+ */
+function content_apply_meta_after_deploy(string $lpToken): void
+{
+    if ($lpToken === '') {
+        return;
+    }
+    $path = content_path_for_lp_token($lpToken);
+    if (!is_file($path)) {
+        return;
+    }
+    $c = read_json($path, []);
+    if ($c === []) {
+        return;
+    }
+    $c = normalize_content_json($c);
+    $c['meta']['status'] = CMS_STATUS_DEPLOYED;
+    $c['meta']['dirty'] = false;
+    $c['meta']['section_dirty'] = [];
+    $c['updated_at'] = now_iso8601();
+    write_json($path, $c);
+}
+
 /**
  * 任意 custom ディレクトリに cms_page_state.json（overlay-apply.js 用）
  */
@@ -294,10 +359,15 @@ function mirror_cms_page_state_to_custom_dir(string $customDir, array $content):
     } elseif (is_array($hero) && isset($hero['url']) && is_string($hero['url']) && $hero['url'] !== '') {
         $heroUrl = $hero['url'];
     }
+    $meta = is_array($content['meta'] ?? null) ? $content['meta'] : [];
     $out = [
         'texts' => $texts,
         'images' => [],
         'updated_at' => $content['updated_at'] ?? now_iso8601(),
+        'meta' => [
+            'dirty' => (bool) ($meta['dirty'] ?? false),
+            'status' => (string) ($meta['status'] ?? CMS_STATUS_EDITING),
+        ],
     ];
     if ($heroUrl !== null) {
         $out['images']['hero'] = ['url' => $heroUrl];

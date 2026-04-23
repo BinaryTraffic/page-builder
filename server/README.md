@@ -10,4 +10,6 @@
 
 `cms/data/` は本番の秘密を置くため、リポジトリでは `.gitkeep` のみ。手順は `docs/SERVER_SETUP.md`。
 
+編集データ `content.json` のフィールド定義: **`docs/CONTENT_JSON.md`**
+
 クライアントとの連絡を Git にまとめる約束は **`docs/GIT_WORKFLOW.md`**。

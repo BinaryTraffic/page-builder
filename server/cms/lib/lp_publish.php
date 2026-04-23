@@ -231,6 +231,7 @@ function lp_build_publish_from_original(string $siteKey, string $lpToken): array
     if (is_file($indexPub)) {
         lp_inject_overlay_script($indexPub);
     }
+    content_apply_meta_after_deploy($lpToken);
     return [
         'ok' => true,
         'message' => '_lp_publish を生成しました。本番URLは /' . $siteKey . '/_lp_publish/ または .htaccess で振り分けてください（SERVER_SETUP 参照）。',

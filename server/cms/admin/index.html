@@ -76,6 +76,17 @@
           <label>リード文 <span class="opt">（.hero-desc）</span>
             <textarea id="heroDesc" rows="4" placeholder="説明文"></textarea>
           </label>
+          <h3 class="ed-h3">本番用ディレクトリ（アップロード＝オリジナル → 生成＝_lp_publish）</h3>
+          <p class="note">
+            ① 編集用の <code>…/&lt;site_key&gt;/</code> にアップロードした<strong>元一式</strong>を <code>_lp_original</code> に固定。② CMS で保存した内容と
+            <code>custom/</code> から <code>_lp_publish</code> へ本番用を再生成。②は何度も可能（<strong>リドゥ</strong>＝毎回オリジナル＋今の DB 上の編集から再生成）。
+            URL 振り分けは <code>server/docs/examples/lp-site-root.htaccess.example</code> を参照。
+          </p>
+          <div class="row publish-btns">
+            <button type="button" class="btn-secondary" id="saveOriginalBtn">① オリジナル固定（_lp_original）</button>
+            <button type="button" class="btn-secondary" id="saveOriginalForceBtn">オリジナルを上書き</button>
+            <button type="button" class="btn-primary" id="publishBtn">② 本番を生成/更新（_lp_publish）</button>
+          </div>
           <div class="row">
             <button type="button" id="switchSiteBtn">LPを切替</button>
             <button type="button" id="loadBtn">再読込</button>

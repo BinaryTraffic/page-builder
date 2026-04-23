@@ -13,7 +13,12 @@ const ERR_JA = {
   credentials_not_found: "この site_key に cms_credentials.json がありません。LP をアップロード済みか確認してください。",
   lp_token_mismatch: "資格情報と lp_meta.json の lp_token が一致しません。",
   site_auth_no_select: "サイトパスワードログインでは LP の切替はできません。ログアウトして管理者でログインしてください。",
-  invalid_credentials_file: "サーバー側の資格情報ファイルが不正です。LP を再生成してください。"
+  invalid_credentials_file: "サーバー側の資格情報ファイルが不正です。LP を再生成してください。",
+  original_exists: "既に _lp_original があります。「オリジナルを上書き」で取り直すか、_lp を整理してください。",
+  lp_dir_not_found: "LP ディレクトリが見つかりません。アップロード先を確認してください。",
+  copy_failed: "ファイルのコピーに失敗しました。サーバーの空きと権限を確認してください。",
+  mkdir_failed: "ディレクトリの作成に失敗しました。",
+  invalid_request: "要求が不正です。"
 };
 
 function errMessage(err) {
@@ -427,6 +432,36 @@ document.getElementById("logoutBtn").addEventListener("click", async () => {
   } catch (err) {
     alert(`ログアウト失敗: ${errMessage(err)}`);
   }
+});
+
+async function runPublishAction(action, force = false) {
+  try {
+    const d = await api("/cms/api/publish-lp.php", {
+      method: "POST",
+      body: JSON.stringify({ action, force })
+    });
+    alert(d.message || "完了しました。");
+  } catch (e) {
+    if (e.code === "original_exists" && !force) {
+      if (confirm("既に _lp_original があります。上書きして取り直しますか？")) {
+        return runPublishAction("snapshot", true);
+      }
+      return;
+    }
+    alert(errMessage(e));
+  }
+}
+
+document.getElementById("saveOriginalBtn")?.addEventListener("click", () => {
+  runPublishAction("snapshot", false);
+});
+document.getElementById("saveOriginalForceBtn")?.addEventListener("click", () => {
+  if (confirm("本当に _lp_original を現在の「アップロード済み」で上書きしますか？")) {
+    runPublishAction("snapshot", true);
+  }
+});
+document.getElementById("publishBtn")?.addEventListener("click", () => {
+  runPublishAction("publish", false);
 });
 
 ["heroSub", "heroTitle", "heroDesc", "heroImage"].forEach((id) => {

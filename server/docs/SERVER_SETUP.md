@@ -29,6 +29,12 @@ Last updated: 2026-04-23 05:53:08 +09:00
   - リポジトリの **`server/cms/overlay-apply.js`** を `https://<host>/cms/overlay-apply.js` として配信できるようにする
   - 各 LP の `index.html` の `</body>` 直前に  
     `<script src="/cms/overlay-apply.js" defer></script>` を1行追加すると、同じオリジンから `custom/cms_page_state.json` を読み **`.hero-bg` / `.hero-sub` / `.hero-title` / `.hero-desc`** を上書きする
+- **オリジナル凍結と本番用コピー（`POST /cms/api/publish-lp.php`）**
+  - 運用: SFTP 先の `…/<site_key>/` を**編集作業用**、**本番**は同階層の **`_lp_publish/`** に出す
+  - **`_lp_original/`** — 「アップロードされた元一式」のスナップショット（管理画面「オリジナル固定」）。上書きは明示のみ
+  - **`_lp_publish/`** — `_lp_original` をベースに、作業中 `custom/` と `cms` 側 `content.json` 由来の `cms_page_state.json` を**マージして再生成**（何度も実行可＝**リドゥ**想定のやり直し）
+  - URL は **`https://<host>/<site_key>/_lp_publish/`** で直接出すか、`server/docs/examples/lp-site-root.htaccess.example` のようにルート配下を `_lp_publish` へ振り分け
+- **全ページ分の画像・文言（ヒーロー以外）** — `content.json` / `cms_page_state` のスロット拡張と、生成 HTML 側の `data-cms` 等の合意が必要。オリジナル/本番の二段構造は先に導入し、中身は段階的に足す
 - **管理画面のディープリンク（クライアントから開く）**
   - 例: `GET /cms/admin/?site_key=作成した site_key`（別名: `for_site`）
   - ブラウザは **ログイン完了後**（または既存セッションで開いた直後）に、内部で `POST /cms/api/select-site.php` を1回投げ、編集画面を開く。サーバが GET だけで `active_site_key` を変えることはない。

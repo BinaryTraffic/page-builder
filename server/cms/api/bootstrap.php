@@ -264,18 +264,19 @@ function now_iso8601(): string
     return (new DateTimeImmutable('now', new DateTimeZone('Asia/Tokyo')))->format(DateTimeInterface::ATOM);
 }
 
+const LP_DIR_ORIGINAL = '_lp_original';
+const LP_DIR_PUBLISH = '_lp_publish';
+
 /**
- * LP 公開ディレクトリ用: custom/cms_page_state.json（静的ページの overlay-apply.js が読む）
+ * 任意 custom ディレクトリに cms_page_state.json（overlay-apply.js 用）
  */
-function mirror_cms_page_state_to_site_custom(string $siteKey, array $content): void
+function mirror_cms_page_state_to_custom_dir(string $customDir, array $content): void
 {
-    if ($siteKey === '' || preg_match('/[\x00-\x1f]/', $siteKey) || str_contains($siteKey, '..') || str_contains($siteKey, '/')) {
+    if ($customDir === '' || str_contains($customDir, '..')) {
         return;
     }
-    $dr = get_document_root();
-    $dir = $dr . '/' . $siteKey . '/custom';
-    if (!is_dir($dir)) {
-        if (!@mkdir($dir, 0755, true) && !is_dir($dir)) {
+    if (!is_dir($customDir)) {
+        if (!@mkdir($customDir, 0755, true) && !is_dir($customDir)) {
             return;
         }
     }
@@ -301,8 +302,20 @@ function mirror_cms_page_state_to_site_custom(string $siteKey, array $content): 
     if ($heroUrl !== null) {
         $out['images']['hero'] = ['url' => $heroUrl];
     }
-    $path = $dir . '/cms_page_state.json';
+    $path = rtrim($customDir, '/\\') . '/cms_page_state.json';
     write_json($path, $out);
+}
+
+/**
+ * ドキュメントルート配下 site_key（編集用）の custom/ に反映
+ */
+function mirror_cms_page_state_to_site_custom(string $siteKey, array $content): void
+{
+    if ($siteKey === '' || preg_match('/[\x00-\x1f]/', $siteKey) || str_contains($siteKey, '..') || str_contains($siteKey, '/')) {
+        return;
+    }
+    $dir = get_document_root() . '/' . $siteKey . '/custom';
+    mirror_cms_page_state_to_custom_dir($dir, $content);
 }
 
 function append_audit(string $userId, string $action, array $meta = []): void

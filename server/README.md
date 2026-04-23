@@ -2,6 +2,8 @@
 
 - `cms/admin/` — 管理 UI（静的・ヒーロープレビュー付き）
 - `cms/overlay-apply.js` — 公開 LP が `cms_page_state.json` を反映する用（任意）
+- `cms/api/publish-lp.php` — `_lp_original` 固定 / `_lp_publish` 本番用生成
+- `docs/examples/lp-site-root.htaccess.example` — 本番 URL を `_lp_publish` に寄せる例
 - `cms/api/` — `login` / `me` / `select-site` / `content` 等
 - `cms/bin/` — 例: `sync-sites-from-lp-meta.php`（台帳取込）
 - `docs/` — 設計・引き渡し用 Markdown

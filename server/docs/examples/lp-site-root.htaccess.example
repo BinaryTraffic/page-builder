@@ -1,0 +1,17 @@
+# ドキュメントルート配下の {site_key}/ にリネームして使う例。
+# 例: https://example.com/shop_foo/ を _lp_publish/ の中身として見せる（mod_rewrite 要・AllowOverride 確認）。
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  # オリジナル凍結は URL 直叩き不可に（任意・403）
+  RewriteRule ^_lp_original(/|$) - [F,L]
+
+  # 本番: _lp_publish には内部からも直接アクセス可
+  # 先頭／index を本番に寄せる例:
+  RewriteRule ^$ _lp_publish/ [L]
+  RewriteRule ^index\.html$ _lp_publish/index.html [L]
+  # 画像・CSS 等: 実ファイルが _lp_publish 内にあるなら
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^(?!_lp_publish/)(.*)$ _lp_publish/$1 [L]
+</IfModule>
